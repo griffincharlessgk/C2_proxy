@@ -1,5 +1,5 @@
 {
-  "c2_host": "YOUR_VPS_IP_HERE",
+  "c2_host": "",
   "c2_users_port": 22222,
   "c2_bots_port": 7777,
   "malware_port": 6666,
