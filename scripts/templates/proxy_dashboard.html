@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C2 Proxy Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .stat-label {
+            color: #666;
+            margin-top: 5px;
+        }
+        .section {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .section h2 {
+            margin-top: 0;
+            color: #333;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        .bot-list, .connection-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .bot-item, .connection-item {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f9f9f9;
+        }
+        .bot-status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        .status-online { background: #d4edda; color: #155724; }
+        .status-offline { background: #f8d7da; color: #721c24; }
+        .status-warning { background: #fff3cd; color: #856404; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .btn-primary { background: #667eea; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn:hover { opacity: 0.8; }
+        .chart-container {
+            height: 300px;
+            margin-top: 20px;
+        }
+        .health-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .health-excellent { background: #28a745; }
+        .health-good { background: #17a2b8; }
+        .health-warning { background: #ffc107; }
+        .health-critical { background: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 C2 Proxy Dashboard</h1>
+            <p>Real-time monitoring and management of proxy server and bot exit nodes</p>
+        </div>
+
+        <div class="controls">
+            <button class="btn btn-primary" onclick="startServer()">Start Server</button>
+            <button class="btn btn-danger" onclick="stopServer()">Stop Server</button>
+            <button class="btn btn-success" onclick="refreshData()">Refresh</button>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="total-requests">0</div>
+                <div class="stat-label">Total Requests</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="total-bytes">0</div>
+                <div class="stat-label">Bytes Transferred</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="active-connections">0</div>
+                <div class="stat-label">Active Connections</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="bot-count">0</div>
+                <div class="stat-label">Connected Bots</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📊 Server Status</h2>
+            <div id="server-status">
+                <p>Server status will be displayed here...</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>🤖 Connected Bots</h2>
+            <div class="bot-list" id="bot-list">
+                <p>Bot list will be displayed here...</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>🔗 Active Connections</h2>
+            <div class="connection-list" id="connection-list">
+                <p>Connection list will be displayed here...</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>⚖️ Load Balancer</h2>
+            <div id="load-balancer-info">
+                <p>Load balancer information will be displayed here...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        
+        socket.on('connect', function() {
+            console.log('Connected to dashboard');
+            socket.emit('request_status');
+        });
+        
+        socket.on('status_update', function(data) {
+            updateDashboard(data);
+        });
+        
+        socket.on('stats_update', function(stats) {
+            updateStats(stats);
+        });
+        
+        socket.on('error', function(data) {
+            console.error('Dashboard error:', data.message);
+            alert('Error: ' + data.message);
+        });
+        
+        function updateDashboard(data) {
+            // Update server status
+            const serverStatus = document.getElementById('server-status');
+            serverStatus.innerHTML = `
+                <p><strong>Running:</strong> ${data.server_status.running ? 'Yes' : 'No'}</p>
+                <p><strong>C2 Server:</strong> ${data.server_status.c2_host}:${data.server_status.c2_port}</p>
+                <p><strong>Proxy Server:</strong> ${data.server_status.c2_host}:${data.server_status.proxy_port}</p>
+                <p><strong>Connected Bots:</strong> ${data.server_status.connected_bots}</p>
+                <p><strong>Active Exit Nodes:</strong> ${data.server_status.active_exit_nodes}</p>
+            `;
+            
+            // Update bot list
+            updateBotList(data.server_status.bots);
+            
+            // Update load balancer info
+            updateLoadBalancerInfo(data.load_balancer_stats);
+        }
+        
+        function updateStats(stats) {
+            document.getElementById('total-requests').textContent = stats.total_requests || 0;
+            document.getElementById('total-bytes').textContent = formatBytes(stats.total_bytes || 0);
+            document.getElementById('active-connections').textContent = stats.active_connections || 0;
+            document.getElementById('bot-count').textContent = stats.bot_count || 0;
+        }
+        
+        function updateBotList(bots) {
+            const botList = document.getElementById('bot-list');
+            if (!bots || bots.length === 0) {
+                botList.innerHTML = '<p>No bots connected</p>';
+                return;
+            }
+            
+            let html = '';
+            bots.forEach(bot => {
+                const statusClass = bot.status === 'online' ? 'status-online' : 'status-offline';
+                html += `
+                    <div class="bot-item">
+                        <h4>${bot.bot_id}</h4>
+                        <p><strong>Hostname:</strong> ${bot.hostname}</p>
+                        <p><strong>Status:</strong> <span class="bot-status ${statusClass}">${bot.status}</span></p>
+                        <p><strong>Proxy Mode:</strong> ${bot.proxy_mode ? 'Enabled' : 'Disabled'}</p>
+                        <p><strong>Requests:</strong> ${bot.requests_handled}</p>
+                        <p><strong>Bytes:</strong> ${formatBytes(bot.bytes_transferred)}</p>
+                    </div>
+                `;
+            });
+            botList.innerHTML = html;
+        }
+        
+        function updateLoadBalancerInfo(lbStats) {
+            const lbInfo = document.getElementById('load-balancer-info');
+            if (!lbStats) {
+                lbInfo.innerHTML = '<p>Load balancer not available</p>';
+                return;
+            }
+            
+            lbInfo.innerHTML = `
+                <p><strong>Total Bots:</strong> ${lbStats.total_bots}</p>
+                <p><strong>Active Bots:</strong> ${lbStats.active_bots}</p>
+                <p><strong>Total Connections:</strong> ${lbStats.total_connections}</p>
+                <p><strong>Total Requests:</strong> ${lbStats.total_requests}</p>
+                <p><strong>Total Bytes:</strong> ${formatBytes(lbStats.total_bytes)}</p>
+            `;
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function startServer() {
+            fetch('/api/start_server', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    c2_host: '0.0.0.0',
+                    c2_port: 7777,
+                    proxy_port: 8080
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Server started successfully');
+                    refreshData();
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error starting server');
+            });
+        }
+        
+        function stopServer() {
+            fetch('/api/stop_server', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Server stopped successfully');
+                    refreshData();
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error stopping server');
+            });
+        }
+        
+        function refreshData() {
+            socket.emit('request_status');
+        }
+        
+        // Auto-refresh every 30 seconds
+        setInterval(refreshData, 30000);
+    </script>
+</body>
+</html>
