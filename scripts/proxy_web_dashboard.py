@@ -36,6 +36,8 @@ proxy_server = None
 load_balancer = None
 health_monitor = None
 c2_client = None
+ C2_HOST = "localhost"
+ C2_CLIENT_PORT = 3334
 dashboard_stats = {
     'start_time': datetime.now(),
     'total_requests': 0,
@@ -137,11 +139,12 @@ def index():
 def api_status():
     """API lấy trạng thái server"""
     global c2_client
+    global C2_HOST, C2_CLIENT_PORT
     
     try:
         # Kết nối với C2 server nếu chưa kết nối
         if not c2_client or not c2_client.connected:
-            c2_client = C2Client("localhost", 3334)
+            c2_client = C2Client(C2_HOST, C2_CLIENT_PORT)
             if not c2_client.connect():
                 return jsonify({'error': 'Cannot connect to C2 server'}), 500
         
@@ -179,12 +182,12 @@ def api_status():
 @app.route('/api/bots')
 def api_bots():
     """API lấy danh sách bot"""
-    global c2_client
+    global c2_client, C2_HOST, C2_CLIENT_PORT
     
     try:
         # Kết nối với C2 server nếu chưa kết nối
         if not c2_client or not c2_client.connected:
-            c2_client = C2Client("localhost", 3334)
+            c2_client = C2Client(C2_HOST, C2_CLIENT_PORT)
             if not c2_client.connect():
                 return jsonify({'error': 'Cannot connect to C2 server'}), 500
         
@@ -197,12 +200,12 @@ def api_bots():
 @app.route('/api/connections')
 def api_connections():
     """API lấy danh sách kết nối proxy"""
-    global c2_client
+    global c2_client, C2_HOST, C2_CLIENT_PORT
     
     try:
         # Kết nối với C2 server nếu chưa kết nối
         if not c2_client or not c2_client.connected:
-            c2_client = C2Client("localhost", 3334)
+            c2_client = C2Client(C2_HOST, C2_CLIENT_PORT)
             if not c2_client.connect():
                 return jsonify({'error': 'Cannot connect to C2 server'}), 500
         
@@ -768,9 +771,17 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Dashboard host")
     parser.add_argument("--port", type=int, default=5001, help="Dashboard port")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--c2-host", default="localhost", help="C2 server host to connect for status")
+    parser.add_argument("--c2-client-port", type=int, default=3334, help="C2 client command port")
     
     args = parser.parse_args()
     
+    # Set C2 connection target for the dashboard
+    global C2_HOST, C2_CLIENT_PORT
+    C2_HOST = args.c2_host
+    C2_CLIENT_PORT = args.c2_client_port
+    print(f"🔗 Dashboard will connect to C2 at {C2_HOST}:{C2_CLIENT_PORT}")
+
     # Create dashboard template
     create_dashboard_template()
     
