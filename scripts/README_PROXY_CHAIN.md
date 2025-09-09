@@ -35,12 +35,12 @@ scripts/
 
 ## 🚀 Sử Dụng
 
-### 1. Chạy Toàn Bộ Hệ Thống (Khuyến Nghị)
+### 1. Chạy thu Toàn Bộ Hệ Thống (Khuyến Nghị)
 
 ```bash
 # Chạy toàn bộ hệ thống với 3 bot servers
 python3 scripts/run_proxy_chain.py --num-bots 3
-
+# 3bot chi la 3 process 
 # Với cấu hình tùy chỉnh
 python3 scripts/run_proxy_chain.py \
     --c2-host 0.0.0.0 \
@@ -84,9 +84,7 @@ python3 scripts/child_bot_server.py \
 
 #### C. Khởi Động Web Dashboard:
 ```bash
-python3 scripts/proxy_web_dashboard.py \
-    --host 0.0.0.0 \
-    --port 5001
+python3 scripts/proxy_web_dashboard.py --host 0.0.0.0 --port 5001 --c2-host 45.38.42.232 --c2-client-port 3334
 ```
 
 ### 3. Test Hệ Thống
