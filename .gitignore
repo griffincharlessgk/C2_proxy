@@ -117,22 +117,43 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Project specific
+# Project specific - C2 Proxy Chain
 logs/
 *.log
 config.json
 botnet_config.json
+proxy_config.json
 
 # Sensitive files
 secrets/
 keys/
 certificates/
+api_keys.txt
+tokens.txt
 
 # Runtime files
 *.pid
 *.sock
+*.lock
 
 # Backup files
 *.bak
 *.backup
 *.tmp
+
+# C2 Proxy Chain specific
+bot_data/
+proxy_cache/
+connection_logs/
+health_reports/
+stats_data/
+
+# Test data
+test_results/
+test_logs/
+performance_data/
+
+# Deployment files
+deploy/
+docker-compose.yml
+Dockerfile
