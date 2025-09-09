@@ -1,1 +1,0 @@
-# This is just a global class used to store important variables used internally by "bane".

