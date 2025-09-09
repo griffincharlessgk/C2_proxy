@@ -36,8 +36,8 @@ proxy_server = None
 load_balancer = None
 health_monitor = None
 c2_client = None
- C2_HOST = "localhost"
- C2_CLIENT_PORT = 3334
+C2_HOST = "localhost"
+C2_CLIENT_PORT = 3334
 dashboard_stats = {
     'start_time': datetime.now(),
     'total_requests': 0,
