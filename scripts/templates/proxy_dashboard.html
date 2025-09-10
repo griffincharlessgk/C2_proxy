@@ -184,6 +184,10 @@
             <div id="load-balancer-info">
                 <p>Load balancer information will be displayed here...</p>
             </div>
+            <div style="margin-top: 15px;">
+                <button class="btn btn-warning" onclick="clearPreferredBot()">Clear Preferred Bot</button>
+                <span style="margin-left: 10px; color: #666;">Use load balancer instead of preferred bot</span>
+            </div>
         </div>
     </div>
 
@@ -272,6 +276,7 @@
                         <p><strong>Requests:</strong> ${bot.requests_handled}</p>
                         <p><strong>Bytes:</strong> ${formatBytes(bot.bytes_transferred)}</p>
                         <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                            <button class="btn btn-success" onclick="selectBot('${bot.bot_id}')">Select as Exit Node</button>
                             <button class="btn btn-danger" onclick="stopBot('${bot.bot_id}')">Stop Bot</button>
                             <input id="cmd-${bot.bot_id}" placeholder="Command" style="flex:1;min-width:220px;padding:8px" />
                             <button class="btn btn-primary" onclick="sendBotCommand('${bot.bot_id}')">Send</button>
@@ -318,6 +323,41 @@
                 }
             })
             .catch(error => { console.error('Error:', error); alert('Error sending command'); });
+        }
+        
+        function selectBot(botId) {
+            fetch('/api/select_bot', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({bot_id: botId})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Bot ' + botId + ' selected as preferred exit node');
+                    refreshData();
+                }
+            })
+            .catch(error => { console.error('Error:', error); alert('Error selecting bot'); });
+        }
+        
+        function clearPreferredBot() {
+            fetch('/api/clear_preferred_bot', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Cleared preferred bot, using load balancer');
+                    refreshData();
+                }
+            })
+            .catch(error => { console.error('Error:', error); alert('Error clearing preferred bot'); });
         }
         
         function updateLoadBalancerInfo(lbStats) {
