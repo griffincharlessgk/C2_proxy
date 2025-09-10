@@ -181,6 +181,7 @@ class ChildBotServer:
     def handle_proxy_request(self, command):
         """Xử lý HTTP proxy request (framed protocol)"""
         try:
+            print(f"🔍 Bot received PROXY_REQUEST: {command.strip()}")
             # Format: PROXY_REQUEST:IP:PORT:TIMESTAMP:TARGET_HOST:TARGET_PORT:IS_HTTPS
             parts = command.split(":")
             if len(parts) >= 7:
@@ -190,6 +191,7 @@ class ChildBotServer:
                 is_https = parts[6].lower() == 'true'
                 
                 print(f"🌐 HTTP Proxy request: {target_host}:{target_port} ({'HTTPS' if is_https else 'HTTP'})")
+                print(f"   🔗 Connection ID: {connection_id}")
                 
                 # Tạo connection đến target
                 self.create_proxy_connection(connection_id, target_host, target_port, is_https, False)
@@ -224,11 +226,13 @@ class ChildBotServer:
     def create_proxy_connection(self, connection_id, target_host, target_port, is_https, is_socks):
         """Tạo proxy connection đến target"""
         try:
+            print(f"🔗 Creating proxy connection to {target_host}:{target_port}")
             # Tạo socket đến target
             target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             target_socket.settimeout(30)
             
             # Kết nối đến target
+            print(f"📡 Connecting to {target_host}:{target_port}...")
             target_socket.connect((target_host, target_port))
             target_socket.settimeout(None)
             

