@@ -1,25 +1,91 @@
-# Async Reverse Proxy / Relay C2 System
+# Hệ thống C2 Reverse Proxy/Relay (asyncio)
 
-This repository contains an asyncio-based C2 reverse proxy/relay system with framed protocol, TLS support, heartbeats, authentication, and multiplexing.
+Hệ thống C2 dùng asyncio để tạo tunnel ngược từ Bot về C2 và cung cấp proxy HTTP (8080) & SOCKS5 (1080). Lưu lượng client được multiplex qua các Bot bằng giao thức frame (JSON + tiền tố độ dài) có xác thực token và heartbeat.
 
-## Components
-- `protocol.py`: Framed protocol (length-prefixed JSON), heartbeat helper
-- `c2_server.py`: C2 server accepting reverse Bot tunnels and local proxy clients (HTTP 8080, SOCKS5 1080)
-- `bot_agent.py`: Bot agent connecting back to C2 and relaying upstream traffic
+## ✅ Tính năng
+- Bất đồng bộ hoàn toàn (asyncio), hiệu năng cao
+- Bot kết nối ngược (TCP/TLS) về C2, tunnel bền vững
+- Giao thức frame: JSON + 4 byte độ dài (big-endian), payload base64
+- Multiplex nhiều phiên trên một tunnel qua `request_id`
+- Proxy HTTP (8080) và SOCKS5 (1080)
+- Cân bằng tải vòng tròn (round-robin) giữa nhiều Bot
+- Xác thực Bot bằng token, heartbeat PING/PONG, logging có cấu trúc
 
-## Features
-- Asyncio concurrency throughout
-- TLS (optional): provide `--certfile` and `--keyfile` to C2
-- Persistent reverse connections from Bots
-- Multiplexing: multiple simultaneous requests per Bot using `request_id`
-- Heartbeat (PING/PONG) for liveness
-- Basic auth for Bots via token
-- Logging for all events
+## 📁 Cấu trúc mã nguồn
+- `protocol.py`: Định nghĩa Frame, FramedStream, Heartbeat
+- `c2_server.py`: Server C2 (nhận tunnel từ Bot; mở proxy HTTP/SOCKS5)
+- `bot_agent.py`: Bot (kết nối C2; mở upstream tới đích; bơm dữ liệu)
 
-## Protocol
-Frames are JSON with a 4-byte big-endian length prefix.
+## 🔧 Yêu cầu
+- Python 3.10+
+- Không phụ thuộc bên thứ ba (chỉ dùng stdlib). TLS là tùy chọn nhưng nên bật khi production.
 
+## 🔐 Tạo Bot Token
+Dùng chuỗi ngẫu nhiên đủ dài và dùng chung cho C2 và các Bot.
+```bash
+python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))  # ~64 ký tự an toàn
+PY
 ```
+
+## 🔒 (Tùy chọn) Tạo chứng chỉ TLS tự ký cho C2
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes \
+  -subj "/CN=localhost"
+```
+Chạy C2 kèm `--certfile cert.pem --keyfile key.pem` để bật TLS cho cổng Bot.
+
+## 🚀 Chạy C2
+```bash
+export BOT_TOKEN="<token_vua_tao>"
+python3 c2_server.py \
+  --host 0.0.0.0 \
+  --bot-port 4443 \
+  --http-port 8080 \
+  --socks-port 1080 \
+  --bot-token "$BOT_TOKEN" \
+  [--certfile cert.pem --keyfile key.pem]
+```
+
+## 🤖 Chạy Bot
+```bash
+export BOT_TOKEN="<token_vua_tao>"
+bot_id=bot_1
+python3 bot_agent.py \
+  --c2-host <IP_C2> \
+  --c2-port 4443 \
+  --token "$BOT_TOKEN" \
+  --bot-id "$bot_id"
+```
+- Bot sẽ tự động reconnect khi mất kết nối.
+- Có thể chạy nhiều Bot (trên nhiều máy) trỏ về cùng C2 và token.
+
+## 🧪 Kiểm thử Proxy
+- HTTP qua proxy HTTP
+```bash
+curl -v -x http://<IP_C2>:8080 http://httpbin.org/ip
+```
+- HTTPS (CONNECT) qua proxy HTTP
+```bash
+curl -v -x http://<IP_C2>:8080 https://httpbin.org/ip
+```
+- HTTPS qua SOCKS5
+```bash
+curl -v --socks5-hostname <IP_C2>:1080 https://httpbin.org/ip
+```
+
+## 🧠 Cách hoạt động (tổng quan)
+- Bot tạo tunnel ngược tới C2 (có thể TLS) và xác thực bằng token.
+- C2 lắng nghe client ở 8080 (HTTP) và 1080 (SOCKS5).
+- Mỗi kết nối client, C2 chọn Bot theo round-robin, sinh `request_id`.
+- C2 gửi `PROXY_REQUEST {host, port}` tới Bot và stream `DATA/END`.
+- Bot mở socket tới đích và trả về `PROXY_RESPONSE/END` cho C2.
+- Nhiều kết nối được multiplex trên cùng tunnel bằng `request_id`.
+- Heartbeat giúp loại bỏ tunnel chết; Bot reconnect sẽ được thêm lại.
+
+## 📦 Định dạng Frame (JSON + 4 byte độ dài)
+```json
 {
   "type": "AUTH|OK|ERR|PING|PONG|PROXY_REQUEST|DATA|PROXY_RESPONSE|END",
   "request_id": "uuid-string",
@@ -27,116 +93,24 @@ Frames are JSON with a 4-byte big-endian length prefix.
   "meta": { "host": "example.com", "port": 443, "token": "..." }
 }
 ```
+- 4 byte đầu là độ dài (big-endian) của phần JSON.
+- Payload nhị phân được mã hóa base64.
 
-## Running
+## 📈 Nhiều Bot
+- Mỗi Bot là một phiên tunnel độc lập.
+- C2 phân phối kết nối mới theo round-robin.
+- Bot rớt kết nối chỉ ảnh hưởng các `request_id` đang chạy trên Bot đó; yêu cầu mới sẽ dùng Bot khác.
+- Có thể mở rộng chiến lược chọn Bot (ít kết nối nhất, độ trễ thấp, v.v.).
 
-### 1) C2 Server
-```
-python3 c2_server.py --host 0.0.0.0 --bot-port 4443 --http-port 8080 --socks-port 1080 --bot-token your_token [--certfile cert.pem --keyfile key.pem]
-```
+## 🔐 Ghi chú bảo mật
+- Nên bật TLS cho cổng Bot trong production (`--certfile/--keyfile`).
+- Bảo mật token (không log/commit), xoay vòng định kỳ.
+- Cân nhắc token riêng cho từng Bot và allowlist IP.
 
-### 2) Bot Agent
-```
-python3 bot_agent.py --c2-host <C2_IP> --c2-port 4443 --token your_token --bot-id bot_1
-```
+## 🛠️ Khắc phục sự cố
+- Không có phản hồi: xác nhận có ít nhất một Bot đã kết nối và xác thực (xem log C2).
+- Lỗi TLS: kiểm tra đường dẫn cert/key; nếu kiểm tra chứng chỉ ở Bot, đảm bảo Bot tin cậy chứng chỉ C2.
+- 502/timeout: kiểm tra khả năng truy cập đích từ máy Bot.
+- Tăng mức log bằng `PYTHONASYNCIODEBUG=1` hoặc chỉnh `logging.basicConfig` trong mã.
 
-### Test
-- HTTP proxy: `curl -x http://<C2_IP>:8080 http://httpbin.org/ip`
-- HTTPS proxy (CONNECT): `curl -x http://<C2_IP>:8080 https://httpbin.org/ip`
-- SOCKS5: `curl --socks5-hostname <C2_IP>:1080 https://httpbin.org/ip`
-
-## Notes
-- For production, enable TLS on the bot reverse port and manage certificates.
-- Add persistence/registration storage as needed.
-- Extend load balancing strategies in `C2Server._next_bot`.
-
-# 🚀 C2 Proxy Chain System
-
-Hệ thống C2 Proxy Chain cho phép tạo mạng proxy phân tán sử dụng các bot đã bị compromise làm exit nodes.
-
-## 📋 Kiến Trúc
-
-```
-PC Client (Browser/App) 
-    ↓ (HTTP/SOCKS5 Proxy)
-C2 Server (Proxy Entry Point)
-    ↓ (Load Balancing)
-Bot1, Bot2, Bot3... (Child Servers)
-    ↓ (Direct Internet Access)
-Internet
-```
-
-## 🚀 Sử Dụng Nhanh
-
-### 1. Chạy Toàn Bộ Hệ Thống:
-```bash
-cd scripts
-python3 run_proxy_chain.py --num-bots 3
-```
-
-### 2. Cấu Hình Client:
-```bash
-# HTTP Proxy
-export http_proxy=http://C2_IP:8080
-export https_proxy=http://C2_IP:8080
-
-# Test
-curl http://httpbin.org/ip
-```
-
-### 3. Web Dashboard:
-Truy cập: `http://C2_IP:5001`
-
-## 📁 Cấu Trúc File
-
-```
-scripts/
-├── c2_proxy_server.py          # C2 Proxy Server chính
-├── child_bot_server.py         # Bot server (exit node)
-├── proxy_load_balancer.py      # Load Balancer & Health Monitor
-├── proxy_web_dashboard.py      # Web Dashboard
-├── run_proxy_chain.py          # Script chạy toàn bộ hệ thống
-├── test_proxy_chain.py         # Test script
-├── README_PROXY_CHAIN.md       # Hướng dẫn chi tiết
-└── templates/
-    └── proxy_dashboard.html    # Dashboard template
-```
-
-## 🔧 Ports
-
-- **3333**: C2 server (bot connections)
-- **8080**: HTTP proxy
-- **1080**: SOCKS5 proxy  
-- **5001**: Web dashboard
-
-## 📖 Hướng Dẫn Chi Tiết
-
-Xem file `scripts/README_PROXY_CHAIN.md` để biết thêm chi tiết về:
-- Cài đặt và cấu hình
-- Load balancing strategies
-- Health monitoring
-- Troubleshooting
-- API reference
-
-## 🎯 Tính Năng
-
-- ✅ HTTP/SOCKS5 Proxy Support
-- ✅ Load Balancing (8 algorithms)
-- ✅ Health Monitoring
-- ✅ Real-time Dashboard
-- ✅ Auto-scaling
-- ✅ Comprehensive Testing
-
-## 🚀 Bắt Đầu
-
-```bash
-# 1. Chạy hệ thống
-python3 scripts/run_proxy_chain.py
-
-# 2. Cấu hình proxy
-export http_proxy=http://localhost:8080
-
-# 3. Test
-curl http://httpbin.org/ip
-```
 

