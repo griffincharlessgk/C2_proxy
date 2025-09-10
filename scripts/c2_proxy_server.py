@@ -1000,9 +1000,10 @@ class C2ProxyServer:
                         self.cleanup_proxy_connection(cid)
                 elif header.startswith("PROXY_READY:"):
                     print(f"🔍 C2 received PROXY_READY: {header.strip()}")
+                    # Format: PROXY_READY:IP:PORT:TIMESTAMP
                     parts = header.split(":")
-                    if len(parts) >= 2:
-                        cid = parts[1]
+                    if len(parts) >= 4:
+                        cid = f"{parts[1]}:{parts[2]}:{parts[3]}"  # IP:PORT:TIMESTAMP
                         print(f"🔍 Parsed connection ID: {cid}")
                         if cid in self.active_proxy_connections:
                             connection = self.active_proxy_connections[cid]
