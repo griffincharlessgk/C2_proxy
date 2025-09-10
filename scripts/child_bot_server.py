@@ -142,9 +142,11 @@ class ChildBotServer:
                     self.handle_scan_command(data)
                     
                 elif data.startswith("DATA:"):
+                    print(f"🔍 Bot received DATA command: {data[:50]}...")
                     self.handle_data_frame(data)
                     
                 elif data.startswith("END:"):
+                    print(f"🔍 Bot received END command: {data}")
                     self.handle_end_frame(data)
                     
                 else:
