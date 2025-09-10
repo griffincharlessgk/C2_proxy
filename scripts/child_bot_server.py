@@ -468,11 +468,20 @@ class ChildBotServer:
                 print(f"📦 Parsed DATA: connection_id={connection_id}, data_len={len(data)}")
                 
                 if connection_id in self.active_connections:
-                    # Forward data to target
+                    # Forward data to target (binary data for HTTPS, encoded for HTTP)
                     target_socket = self.active_connections[connection_id]['target_socket']
-                    target_socket.send(data.encode())
+                    connection_info = self.active_connections[connection_id]
+                    
+                    if connection_info['is_https']:
+                        # HTTPS: send binary data directly
+                        target_socket.send(data.encode('latin1'))
+                        print(f"📤 Forwarded {len(data)} bytes (binary) to HTTPS target")
+                    else:
+                        # HTTP: send as text
+                        target_socket.send(data.encode())
+                        print(f"📤 Forwarded {len(data)} bytes (text) to HTTP target")
+                    
                     self.active_connections[connection_id]['bytes_transferred'] += len(data)
-                    print(f"📤 Forwarded {len(data)} bytes to target")
                 else:
                     print(f"⚠️  Connection {connection_id} not found for data forwarding")
                     print(f"   Available connections: {list(self.active_connections.keys())}")
