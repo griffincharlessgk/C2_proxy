@@ -339,8 +339,8 @@ class ChildBotServer:
             
             try:
                 connection['target_socket'].close()
-        except Exception as e:
-            print(f"⚠️  Error in cleanup: {e}")
+            except Exception as e:
+                print(f"⚠️  Error in cleanup: {e}")
                 
             # Update statistics
             self.stats['active_connections'] = max(0, self.stats['active_connections'] - 1)
@@ -458,8 +458,8 @@ class ChildBotServer:
         if self.c2_socket:
             try:
                 self.c2_socket.close()
-        except Exception as e:
-            print(f"⚠️  Error in cleanup: {e}")
+            except Exception as e:
+                print(f"⚠️  Error in cleanup: {e}")
                 
         self.connected_to_c2 = False
         print("✅ Cleanup completed")
