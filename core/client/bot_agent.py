@@ -265,21 +265,9 @@ class BotAgent:
                 chunk = await reader.read(self.buffer_size)
                 if not chunk:
                     break
-                try:
-                    await self.stream.send(Frame(type="PROXY_RESPONSE", request_id=req_id, payload=chunk))
-                except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                    logger.debug("bot upstream->c2 write error: %s", e)
-                    break
-                except Exception as e:
-                    logger.warning("bot upstream->c2 unexpected write error: %s", e)
-                    break
+                await self.stream.send(Frame(type="PROXY_RESPONSE", request_id=req_id, payload=chunk))
         finally:
-            try:
-                await self.stream.send(Frame(type="END", request_id=req_id))
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.debug("bot send END ignored: %s", e)
-            except Exception as e:
-                logger.warning("bot send END unexpected error: %s", e)
+            await self.stream.send(Frame(type="END", request_id=req_id))
 
 
 async def main():
