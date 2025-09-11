@@ -27,6 +27,40 @@ The C2 system is a modular Command and Control platform designed with clean arch
 - Both depend on abstractions
 - Abstractions don't depend on details
 
+## Project Structure
+
+```
+C2/
+├── core/                    # Core components
+│   ├── protocol/           # Communication protocol
+│   │   └── protocol.py     # Frame, FramedStream, Heartbeat
+│   ├── server/            # C2 server logic
+│   │   └── c2_server.py   # Main C2 server implementation
+│   ├── client/            # Bot agent logic
+│   │   └── bot_agent.py   # Bot agent implementation
+│   └── utils/             # Utilities
+│       ├── config.py      # Configuration management
+│       └── logging.py     # Logging utilities
+├── features/              # Feature modules
+│   ├── monitoring/        # Health checks & web dashboard
+│   │   ├── health_check.py
+│   │   ├── web_dashboard.py
+│   │   ├── templates/
+│   │   └── static/
+│   ├── proxy/            # Proxy features (placeholder)
+│   └── management/       # Management tools (placeholder)
+├── tests/                # Test suite
+│   ├── unit/            # Unit tests
+│   ├── integration/     # Integration tests
+│   └── e2e/            # End-to-end tests
+├── scripts/             # Utility scripts
+├── config/              # Configuration files
+├── docs/               # Documentation
+├── main_c2.py          # C2 server entry point
+├── main_bot.py         # Bot agent entry point
+└── run_tests.py        # Test runner
+```
+
 ## Module Structure
 
 ### Core Module (`core/`)
