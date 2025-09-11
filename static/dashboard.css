@@ -1,0 +1,16 @@
+:root { --bg:#0f172a; --card:#111827; --muted:#94a3b8; --txt:#e5e7eb; --accent:#22d3ee; --ok:#22c55e; --warn:#f59e0b; }
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 ui-sans-serif,system-ui}
+.header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #1f2937}
+.header h1{margin:0;font-size:18px}
+.status-pill{padding:4px 10px;border-radius:999px;background:#1f2937;color:var(--muted);font-weight:600}
+.container{max-width:1000px;margin:20px auto;padding:0 16px}
+.card{background:var(--card);border:1px solid #1f2937;border-radius:12px;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.item{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:#0b1220;border:1px solid #1f2937;border-radius:8px}
+.k{color:var(--muted)} .v{font-weight:600}
+.row{display:flex;align-items:center;justify-content:space-between}
+.btn{background:#0b1220;color:var(--txt);border:1px solid #334155;padding:6px 10px;border-radius:8px;cursor:pointer}
+.btn:hover{border-color:#475569}
+.list .item{margin-bottom:8px}
+.badge{padding:2px 8px;border-radius:999px;background:#0b1220;border:1px solid #334155;color:var(--muted);font-size:12px}
+.ok{color:var(--ok)} .warn{color:var(--warn)}

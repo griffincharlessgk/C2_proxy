@@ -13,6 +13,8 @@ import asyncio
 import ssl
 import logging
 import uuid
+import os
+import json
 from typing import Dict, Tuple, Optional
 
 from protocol import Frame, FramedStream, Heartbeat
@@ -46,9 +48,16 @@ class C2Server:
         self.bot_token = bot_token or "changeme"
         self.ssl_ctx: Optional[ssl.SSLContext] = None
         if certfile and keyfile:
-            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
-            self.ssl_ctx = ctx
+            try:
+                if os.path.exists(certfile) and os.path.exists(keyfile):
+                    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+                    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+                    self.ssl_ctx = ctx
+                    logger.info("TLS enabled with cert: %s, key: %s", certfile, keyfile)
+                else:
+                    logger.warning("TLS files not found, running without TLS (cert: %s, key: %s)", certfile, keyfile)
+            except Exception as e:
+                logger.warning("Failed to initialize TLS, running without TLS: %s", e)
 
         self.bots: Dict[str, BotSession] = {}
         self._rr_keys = []
@@ -314,37 +323,45 @@ class C2Server:
                 self.preferred_bot = None
                 json_response({"ok": True})
             else:
-                # static index
-                if path == "/" or path == "/index.html":
-                    body = ("""
-<!doctype html><html><head><meta charset='utf-8'><title>C2 Dashboard</title>
-<style>body{font-family:sans-serif;margin:20px} .card{border:1px solid #ddd;padding:12px;border-radius:8px;margin-bottom:12px}</style>
-</head><body>
-<h2>C2 Dashboard</h2>
-<div id='status' class='card'>Loading...</div>
-<div id='bots' class='card'></div>
-<div id='conns' class='card'></div>
-<script>
-async function j(u,o){const r=await fetch(u,o);return r.json()}
-async function refresh(){
-  const s=await j('/api/status');
-  document.getElementById('status').innerHTML = `
-    <b>Host:</b> ${s.host} | <b>Ports</b> bot:${s.ports.bot} http:${s.ports.http} socks:${s.ports.socks} api:${s.ports.api}<br>
-    <b>Bots:</b> ${s.bot_count} [preferred: ${s.preferred_bot||'-'}] | <b>Active connections:</b> ${s.active_connections}`
-  const b=await j('/api/bots');
-  document.getElementById('bots').innerHTML = '<b>Bots</b><br>' + b.bots.map(x=>`${x.bot_id} (active:${x.active_requests}) <button onclick="sel('${x.bot_id}')">Select</button>`).join('<br>');
-  const c=await j('/api/connections');
-  document.getElementById('conns').innerHTML = '<b>Connections</b><br>' + c.connections.map(x=>`${x.request_id} → ${x.target} via ${x.bot_id}`).join('<br>');
-}
-async function sel(id){await fetch('/api/select_bot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot_id:id})});refresh()}
-setInterval(refresh,2000);refresh();
-</script>
-</body></html>
-""").encode()
+                # Serve dashboard and static assets
+                import os
+                root_dir = os.path.dirname(__file__)
+                proj_root = root_dir  # repository root is current dir in this version
+                templates_dir = os.path.join(proj_root, 'templates')
+                static_dir = os.path.join(proj_root, 'static')
+
+                def send_bytes(body: bytes, content_type: str = 'text/plain; charset=utf-8', status: str = '200 OK'):
                     hdr = (
-                        f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(body)}\r\n\r\n"
+                        f"HTTP/1.1 {status}\r\n"
+                        f"Content-Type: {content_type}\r\n"
+                        f"Content-Length: {len(body)}\r\n"
+                        f"Access-Control-Allow-Origin: *\r\n\r\n"
                     ).encode()
                     writer.write(hdr + body)
+
+                if path in ('/', '/dashboard', '/index.html'):
+                    html_path = os.path.join(templates_dir, 'dashboard.html')
+                    try:
+                        with open(html_path, 'rb') as f:
+                            body = f.read()
+                        send_bytes(body, 'text/html; charset=utf-8')
+                    except Exception:
+                        writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
+                elif path.startswith('/static/'):
+                    rel = path[len('/static/'):]
+                    safe = os.path.normpath(rel).lstrip(os.sep)
+                    file_path = os.path.join(static_dir, safe)
+                    ctype = 'text/plain; charset=utf-8'
+                    if file_path.endswith('.js'):
+                        ctype = 'application/javascript; charset=utf-8'
+                    elif file_path.endswith('.css'):
+                        ctype = 'text/css; charset=utf-8'
+                    try:
+                        with open(file_path, 'rb') as f:
+                            body = f.read()
+                        send_bytes(body, ctype)
+                    except Exception:
+                        writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
                 else:
                     writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
         except Exception as e:
@@ -367,6 +384,7 @@ setInterval(refresh,2000);refresh();
 async def main():
     import argparse
     p = argparse.ArgumentParser()
+    p.add_argument("--config", default="config/config.json", help="Path to config JSON")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--bot-port", type=int, default=4443)
     p.add_argument("--http-port", type=int, default=8080)
@@ -376,7 +394,33 @@ async def main():
     p.add_argument("--bot-token", default="changeme")
     args = p.parse_args()
 
-    server = C2Server(args.host, args.bot_port, args.http_port, args.socks_port, args.certfile, args.keyfile, args.bot_token)
+    # Load config file if exists
+    cfg = {}
+    cfg_path = args.config
+    if cfg_path and os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load config %s: %s", cfg_path, e)
+
+    # Derive values: CLI overrides config
+    host = args.host if args.host != p.get_default("host") or not cfg.get("host") else cfg.get("host")
+    host = args.host if args.host != p.get_default("host") else cfg.get("host", args.host)
+    bot_port = args.bot_port if args.bot_port != p.get_default("bot_port") else cfg.get("bot_port", args.bot_port)
+    http_port = args.http_port if args.http_port != p.get_default("http_port") else cfg.get("http_port", args.http_port)
+    socks_port = args.socks_port if args.socks_port != p.get_default("socks_port") else cfg.get("socks_port", args.socks_port)
+    api_port = cfg.get("api_port", 5001)  # API port only from config in this version
+
+    # Security
+    bot_token = args.bot_token if args.bot_token != p.get_default("bot_token") else cfg.get("bot_token", args.bot_token)
+    tls_cfg = cfg.get("tls", {})
+    tls_enabled_cfg = bool(tls_cfg.get("enabled"))
+    # Only take cert/key from config when tls.enabled is true; CLI overrides always respected
+    certfile = args.certfile if args.certfile else (tls_cfg.get("certfile") if tls_enabled_cfg else None)
+    keyfile = args.keyfile if args.keyfile else (tls_cfg.get("keyfile") if tls_enabled_cfg else None)
+
+    server = C2Server(host, bot_port, http_port, socks_port, certfile, keyfile, bot_token, api_port)
     await server.serve()
 
 
