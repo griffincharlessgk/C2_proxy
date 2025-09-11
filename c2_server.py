@@ -114,23 +114,19 @@ class C2Server:
                     req_id = frame.request_id
                     if not req_id:
                         continue
-                    info = session.active.get(req_id)
-                    if info and frame.payload:
+                    writer = session.active.get(req_id)
+                    if writer and frame.payload:
                         try:
-                            w = info.get("writer")
-                            if w:
-                                w.write(frame.payload)
-                                await w.drain()
+                            writer.write(frame.payload)
+                            await writer.drain()
                         except Exception as e:
                             logger.warning("client write error: %s", e)
                 elif frame.type == "END":
                     req_id = frame.request_id
-                    info = session.active.pop(req_id, None)
-                    if info:
+                    w = session.active.pop(req_id, None)
+                    if w:
                         try:
-                            w = info.get("writer")
-                            if w:
-                                w.close()
+                            w.close()
                         except Exception:
                             pass
                 else:
