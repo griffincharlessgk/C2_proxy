@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width,initial-scale=1'>
+  <title>C2 Dashboard</title>
+  <style>
+    :root{--bg:#0f172a;--card:#111827;--text:#e5e7eb;--muted:#9ca3af}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    .card{background:var(--card);border:1px solid #1f2937;border-radius:12px;padding:16px;margin-bottom:16px}
+    h2{margin:0 0 12px 0;font-size:20px;color:#fff}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border-bottom:1px solid #1f2937;text-align:left}
+    th{color:var(--muted);font-weight:600}
+    .muted{color:var(--muted)}
+    .btn{background:#0ea5e9;border:none;color:#001018;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .kpi{display:flex;gap:8px;flex-wrap:wrap}
+    .pill{background:#0b1220;border:1px solid #1F2937;border-radius:999px;padding:6px 10px}
+  </style>
+</head>
+<body>
+  <div class='wrap'>
+    <h2 style='margin:6px 0 16px 0'>C2 Dashboard</h2>
+    <div id='status' class='card'>Đang tải...</div>
+    <div id='bots' class='card'></div>
+    <div id='conns' class='card'></div>
+  </div>
+  <script src='/static/dashboard.js'></script>
+</body>
+</html>

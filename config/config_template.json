@@ -1,0 +1,36 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "bot_port": 4443,
+    "http_port": 8080,
+    "socks_port": 1080,
+    "api_port": 5001
+  },
+  "security": {
+    "bot_token": "YOUR_BOT_TOKEN_HERE",
+    "tls": {
+      "enabled": false,
+      "cert_file": "cert.pem",
+      "key_file": "key.pem"
+    }
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+  },
+  "limits": {
+    "max_bots": 100,
+    "max_connections_per_bot": 50,
+    "connection_timeout": 300
+  },
+  "heartbeat": {
+    "interval": 30,
+    "timeout": 90
+  },
+  "network": {
+    "buffer_size": 4096,
+    "read_timeout": 30,
+    "write_timeout": 30,
+    "connect_timeout": 10
+  }
+}

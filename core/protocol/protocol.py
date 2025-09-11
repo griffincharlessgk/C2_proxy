@@ -107,8 +107,10 @@ class FramedStream:
     def close(self) -> None:
         try:
             self.writer.close()
-        except Exception:
-            pass
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.debug("stream close error: %s", e)
+        except Exception as e:
+            logger.warning("unexpected stream close error: %s", e)
 
 
 class Heartbeat:
@@ -128,14 +130,27 @@ class Heartbeat:
         self._running = True
         self._task = asyncio.create_task(self._run(), name=f"hb-sender-{self.name}")
 
+    async def stop(self) -> None:
+        """Stop the heartbeat."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
     async def _run(self) -> None:
         try:
             while self._running:
                 await asyncio.sleep(self.interval)
                 try:
                     await self.stream.send(Frame(type="PING"))
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    logger.warning("%s: connection error sending PING: %s", self.name, e)
+                    break
                 except Exception as e:
-                    logger.warning("%s: failed to send PING: %s", self.name, e)
+                    logger.error("%s: unexpected error sending PING: %s", self.name, e)
                     break
                 # timeout check
                 if (time.monotonic() - self._last_pong) > self.timeout:
@@ -145,8 +160,10 @@ class Heartbeat:
             self._running = False
             try:
                 self.stream.close()
-            except Exception:
-                pass
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.debug("%s: stream close error: %s", self.name, e)
+            except Exception as e:
+                logger.warning("%s: unexpected stream close error: %s", self.name, e)
 
     async def handle_rx(self, frame: Frame) -> bool:
         """Return True if heartbeat handled the frame."""
