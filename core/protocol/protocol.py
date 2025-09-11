@@ -25,7 +25,6 @@ Notes:
 
 import asyncio
 import base64
-import contextlib
 import json
 import logging
 import time
@@ -178,11 +177,9 @@ class Heartbeat:
 
     async def stop(self) -> None:
         self._running = False
-        if self._task and not self._task.done():
+        if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(Exception):
                 await self._task
-            except asyncio.CancelledError:
-                pass
 
 

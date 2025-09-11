@@ -14,10 +14,6 @@ import sys
 import time
 from typing import Dict, Tuple, Optional
 
-# Add project root to Python path for direct execution
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
 from core.protocol import Frame, FramedStream, Heartbeat
 from core.utils.config import load_config, validate_config
 from core.utils.logging import setup_logging, get_logger

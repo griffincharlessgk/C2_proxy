@@ -18,10 +18,6 @@ import signal
 import sys
 from typing import Dict, Optional
 
-# Add project root to Python path for direct execution
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
 from core.protocol import Frame, FramedStream, Heartbeat
 
 
