@@ -114,3 +114,35 @@ curl -v --socks5-hostname <IP_C2>:1080 https://httpbin.org/ip
 - Tăng mức log bằng `PYTHONASYNCIODEBUG=1` hoặc chỉnh `logging.basicConfig` trong mã.
 
 
+## 🖥️ Web Dashboard (UI)
+- Truy cập giao diện quản trị: `http://<IP_C2>:5001/dashboard`
+- Tự động cập nhật 2s/lần: số bot, kết nối đang hoạt động, chọn bot ưu tiên.
+- Mã nguồn UI đã tách riêng:
+  - `templates/dashboard.html`
+  - `static/dashboard.css`
+  - `static/dashboard.js`
+
+## ⚙️ Cấu hình (config)
+- File: `config/config.json`
+```json
+{
+  "host": "0.0.0.0",
+  "bot_port": 4443,
+  "http_port": 8080,
+  "socks_port": 1080,
+  "api_port": 5001,
+  "bot_token": "changeme",
+  "tls": {"enabled": false, "certfile": "cert.pem", "keyfile": "key.pem"}
+}
+```
+- Bản hiện tại vẫn nhận tham số qua CLI. Bạn có thể đồng bộ thủ công:
+```bash
+python3 c2_server.py \
+  --host $(jq -r .host config/config.json) \
+  --bot-port $(jq -r .bot_port config/config.json) \
+  --http-port $(jq -r .http_port config/config.json) \
+  --socks-port $(jq -r .socks_port config/config.json) \
+  --bot-token $(jq -r .bot_token config/config.json)
+```
+Hoặc chỉnh trực tiếp tham số khi chạy.
+

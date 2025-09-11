@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C2 Dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <header class="header">
+    <h1>C2 Dashboard</h1>
+    <div class="status-pill" id="health">—</div>
+  </header>
+  <main class="container">
+    <section class="card">
+      <h2>Server Status</h2>
+      <div id="status" class="grid"></div>
+    </section>
+    <section class="card">
+      <div class="row">
+        <h2>Bots</h2>
+        <button id="clearPref" class="btn">Clear Preferred</button>
+      </div>
+      <div id="bots" class="list"></div>
+    </section>
+    <section class="card">
+      <h2>Active Connections</h2>
+      <div id="conns" class="list"></div>
+    </section>
+  </main>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
