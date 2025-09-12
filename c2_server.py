@@ -104,8 +104,13 @@ class C2Server:
             ]
             self._tasks.extend(server_tasks)
             
-            # Wait for shutdown signal
-            await self._shutdown_event.wait()
+            # Wait for shutdown signal with timeout
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("Shutdown timeout, forcing exit...")
+                import os
+                os._exit(1)
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
         finally:
@@ -114,8 +119,13 @@ class C2Server:
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
         def signal_handler(signum, frame):
-            logger.info("Received signal %d, initiating graceful shutdown...", signum)
-            self._shutdown_event.set()
+            if not self._shutdown_event.is_set():
+                logger.info("Received signal %d, initiating graceful shutdown...", signum)
+                self._shutdown_event.set()
+            else:
+                logger.warning("Signal %d received again; forcing immediate shutdown...", signum)
+                import os
+                os._exit(1)
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, signal_handler)

@@ -115,7 +115,9 @@ class BotAgent:
                 logger.info("Received signal %d, initiating graceful shutdown...", signum)
                 self._shutdown_event.set()
             else:
-                logger.debug("Signal %d received again; shutdown already in progress", signum)
+                logger.warning("Signal %d received again; forcing immediate shutdown...", signum)
+                import os
+                os._exit(1)
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, signal_handler)
