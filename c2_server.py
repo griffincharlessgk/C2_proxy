@@ -104,17 +104,8 @@ class C2Server:
             ]
             self._tasks.extend(server_tasks)
             
-            # Wait for shutdown signal with timeout
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                logger.warning("Shutdown timeout, forcing exit...")
-                import os
-                os._exit(1)
-        except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt")
-        finally:
-            await self._cleanup()
+            # Wait for shutdown signal (no timeout)
+            await self._shutdown_event.wait() 
 
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
