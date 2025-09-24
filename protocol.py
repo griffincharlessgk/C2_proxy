@@ -88,10 +88,16 @@ class FramedStream:
         self._lock = asyncio.Lock()
 
     async def send(self, frame: Frame) -> None:
+        if self.writer.is_closing():
+            return
         data = frame.to_bytes()
         async with self._lock:
-            self.writer.write(data)
-            await self.writer.drain()
+            try:
+                self.writer.write(data)
+                await self.writer.drain()
+            except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
+                # Connection is dead, silently ignore
+                pass
 
     async def recv(self, timeout: Optional[float] = None) -> Optional[Frame]:
         try:
@@ -133,10 +139,11 @@ class Heartbeat:
         try:
             while self._running:
                 await asyncio.sleep(self.interval)
+                if self.stream.writer.is_closing():
+                    break
                 try:
                     await self.stream.send(Frame(type="PING"))
-                except Exception as e:
-                    logger.warning("%s: failed to send PING: %s", self.name, e)
+                except Exception:
                     break
                 # timeout check
                 if (time.monotonic() - self._last_pong) > self.timeout:
