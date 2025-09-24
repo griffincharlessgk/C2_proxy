@@ -105,7 +105,11 @@ class C2Server:
             self._tasks.extend(server_tasks)
             
             # Wait for shutdown signal (no timeout)
-            await self._shutdown_event.wait() 
+            await self._shutdown_event.wait()
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt")
+        finally:
+            await self._cleanup()
 
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
